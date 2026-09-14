@@ -95,6 +95,12 @@ export interface RasterTilesetDescriptor {
    *
    * Provided by the caller (e.g. `COGLayer`) so that this package itself
    * does not need a proj4 dependency.
+   *
+   * **Must never return NaN.** proj4 yields `[NaN, NaN]` at the poles, where
+   * Mercator is undefined, so the caller is responsible for clamping — see
+   * `makeClampedForwardTo3857` in `@developmentseed/proj`. Owning the
+   * invariant here means consumers can use this directly instead of each
+   * re-wrapping it.
    */
   projectTo3857: ProjectionFunction;
 

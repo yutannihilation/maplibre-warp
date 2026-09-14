@@ -4,12 +4,7 @@ export {
   geoTiffToDescriptor,
   imageForLevel,
 } from "./geotiff-tileset.js";
-export {
-  addAlphaChannel,
-  fetchGeoTIFF,
-  getGeographicBounds,
-  toGlView,
-} from "./geotiff-utils.js";
+export { addAlphaChannel, fetchGeoTIFF, toGlView } from "./geotiff-utils.js";
 export type {
   GeoTiffRenderer,
   GeoTiffTileTextures,

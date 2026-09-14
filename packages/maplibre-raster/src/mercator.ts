@@ -119,7 +119,14 @@ export function mercatorFromLngLat(lng: number, lat: number): Point {
   ];
 }
 
-/** Convert WGS84 lng/lat (degrees) to common space `[0, 512]`, Y north-up. */
+/**
+ * Convert WGS84 lng/lat (degrees) to common space `[0, 512]`, Y north-up.
+ *
+ * This is `@math.gl/web-mercator`'s `lngLatToWorld` except that it **clamps**
+ * to the Web Mercator latitude limit instead of asserting `|lat| <= 90`. That
+ * matters: at exactly ±90 the library's formula returns ±Infinity, and the
+ * traversal feeds it dataset bounds that can legitimately reach the poles.
+ */
 export function commonSpaceFromLngLat(lng: number, lat: number): Point {
   const clampedLat = Math.max(
     -MAX_WEB_MERCATOR_LAT,
@@ -133,7 +140,12 @@ export function commonSpaceFromLngLat(lng: number, lat: number): Point {
   ];
 }
 
-/** Convert a common-space position back to WGS84 lng/lat (degrees). */
+/**
+ * Convert a common-space position back to WGS84 lng/lat (degrees).
+ *
+ * The inverse of {@link commonSpaceFromLngLat}, matching
+ * `@math.gl/web-mercator`'s `worldToLngLat`.
+ */
 export function lngLatFromCommonSpace([x, y]: Point): Point {
   const lng = (x / COMMON_SPACE_SIZE) * 360 - 180;
   const phi =

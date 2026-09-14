@@ -9,16 +9,14 @@
 //      and the `project` traversal parameter are gone. Mercator only.
 //   3. World-copy passes are removed. The layer draws the primary world only;
 //      see the README's limitations section.
-//   4. `makeClampedForwardTo3857` is imported from `@developmentseed/proj`
-//      rather than duplicated, and the common-space rescale helpers moved to
+//   4. Pole clamping is the descriptor's responsibility (see
+//      `RasterTilesetDescriptor.projectTo3857`) rather than being re-applied
+//      on every call here, and the common-space rescale helpers moved to
 //      `mercator.ts`.
 //   5. The LOD criterion's metres-per-CSS-pixel uses `2^(zoom + 9)`, matching
 //      MapLibre's 512-pixel-tile zoom convention. See {@link getMetersPerPixel}.
 
-import {
-  makeClampedForwardTo3857,
-  transformBounds,
-} from "@developmentseed/proj";
+import { transformBounds } from "@developmentseed/proj";
 import type { OrientedBoundingBox } from "@math.gl/culling";
 import {
   CullingVolume,
@@ -375,7 +373,6 @@ export class RasterTileNode {
       REF_POINTS_9,
       tileCorners,
       this.descriptor.projectTo3857,
-      this.descriptor.projectTo4326,
     );
 
     const commonSpacePositions = refPointsEPSG3857.map((xy) =>
@@ -434,13 +431,8 @@ function sampleReferencePointsInEPSG3857(
   refPoints: [number, number][],
   tileCorners: Corners,
   projectTo3857: ProjectionFunction,
-  projectTo4326: ProjectionFunction,
 ): Point[] {
   const { topLeft, topRight, bottomLeft, bottomRight } = tileCorners;
-  const clampedProjectTo3857 = makeClampedForwardTo3857(
-    projectTo3857,
-    projectTo4326,
-  );
   const refPointPositions: Point[] = [];
 
   for (const [relX, relY] of refPoints) {
@@ -452,7 +444,7 @@ function sampleReferencePointsInEPSG3857(
       relX,
       relY,
     );
-    refPointPositions.push(clampedProjectTo3857(geoX, geoY));
+    refPointPositions.push(projectTo3857(geoX, geoY));
   }
 
   return refPointPositions;

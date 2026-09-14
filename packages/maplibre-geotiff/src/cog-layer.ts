@@ -36,7 +36,7 @@ import {
 import type { Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
 import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
-import { fetchGeoTIFF, getGeographicBounds } from "./geotiff-utils.js";
+import { fetchGeoTIFF } from "./geotiff-utils.js";
 import type { GeoTiffRenderer } from "./render-pipeline.js";
 import { inferRenderPipeline } from "./render-pipeline.js";
 
@@ -197,6 +197,9 @@ export class COGLayer extends RasterCustomLayer {
       mpu,
     });
 
+    // `transformBounds` densifies the edges, so a CRS whose boundary bows
+    // outward in lng/lat is fully enclosed. Reprojecting only the four corners
+    // would under-cover it.
     const rawBounds = transformBounds(
       projectTo4326,
       ...descriptor.projectedBounds,
@@ -215,7 +218,14 @@ export class COGLayer extends RasterCustomLayer {
 
     this.props.onGeoTIFFLoad?.(geotiff, {
       projection: sourceProjection,
-      geographicBounds: getGeographicBounds(geotiff, converter4326),
+      // The unclamped extent: callers want the dataset's true footprint, while
+      // `wgs84Bounds` above is clamped for tile selection.
+      geographicBounds: {
+        west: rawBounds[0],
+        south: rawBounds[1],
+        east: rawBounds[2],
+        north: rawBounds[3],
+      },
     });
 
     const maxError = this.props.maxError ?? DEFAULT_MAX_ERROR;

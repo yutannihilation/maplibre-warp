@@ -22,11 +22,8 @@
   "license": "MIT",
   "dependencies": {
     "@cogeotiff/core": "^9.5.0",
-    "@developmentseed/affine": "0.8.0-beta.2",
-    "@developmentseed/epsg": "0.8.0-beta.2",
     "@developmentseed/geotiff": "0.8.0-beta.2",
     "@developmentseed/proj": "0.8.0-beta.2",
-    "@developmentseed/raster-reproject": "0.8.0-beta.2",
     "@maplibre-cog-warp/raster": "workspace:^",
     "proj4": "^2.20.9"
   },

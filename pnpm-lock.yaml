@@ -146,19 +146,10 @@ importers:
       '@cogeotiff/core':
         specifier: ^9.5.0
         version: 9.5.0
-      '@developmentseed/affine':
-        specifier: 0.8.0-beta.2
-        version: 0.8.0-beta.2
-      '@developmentseed/epsg':
-        specifier: 0.8.0-beta.2
-        version: 0.8.0-beta.2
       '@developmentseed/geotiff':
         specifier: 0.8.0-beta.2
         version: 0.8.0-beta.2
       '@developmentseed/proj':
-        specifier: 0.8.0-beta.2
-        version: 0.8.0-beta.2
-      '@developmentseed/raster-reproject':
         specifier: 0.8.0-beta.2
         version: 0.8.0-beta.2
       '@maplibre-cog-warp/raster':
@@ -183,13 +174,7 @@ importers:
       '@developmentseed/raster-reproject':
         specifier: 0.8.0-beta.2
         version: 0.8.0-beta.2
-      '@math.gl/core':
-        specifier: ^4.1.0
-        version: 4.1.0
       '@math.gl/culling':
-        specifier: ^4.1.0
-        version: 4.1.0
-      '@math.gl/web-mercator':
         specifier: ^4.1.0
         version: 4.1.0
     devDependencies:
@@ -327,9 +312,6 @@ packages:
   '@developmentseed/affine@0.8.0-beta.2':
     resolution: {integrity: sha512-e7+GJ+XCFhM3qKuF+d1GXdUj5kX77qc4ERdY+ism7LM3d4g0KEkjUtLPGzJg3sTgg2M8nWUCpPALY7VmVRw1Bw==}
 
-  '@developmentseed/epsg@0.8.0-beta.2':
-    resolution: {integrity: sha512-qlP6dtt2SUb0JCUOojubIP95ObpBt2NQrrfUry6WzECdtXEK10m807cCm5SnXXdzs8G8r71I7QJWr3hcEBenTw==}
-
   '@developmentseed/geotiff@0.8.0-beta.2':
     resolution: {integrity: sha512-CBZUtJXVwVFKahUJfCMlDuSZ01i7OUFz2unjH0sza4PnKVRCD7bukfSrZQef3zJg32yhpuTwb/I0PfuDKS4Gcw==}
 
@@ -394,9 +376,6 @@ packages:
 
   '@math.gl/types@4.1.0':
     resolution: {integrity: sha512-clYZdHcmRvMzVK5fjeDkQlHUzXQSNdZ7s4xOqC3nJPgz4C/TZkUecTo9YS4PruZqtDda/ag4erndP0MIn40dGA==}
-
-  '@math.gl/web-mercator@4.1.0':
-    resolution: {integrity: sha512-HZo3vO5GCMkXJThxRJ5/QYUYRr3XumfT8CzNNCwoJfinxy5NtKUd7dusNTXn7yJ40UoB8FMIwkVwNlqaiRZZAw==}
 
   '@oxc-project/types@0.149.0':
     resolution: {integrity: sha512-Efcc+iF0j3Bf67YjEqIqWXbX5XddXoK/Mw4K1/JuXwRCZ8N16VR7iT23nlCc9XrveFVh/E5Rqs2StT0V8v9LdA==}
@@ -1087,8 +1066,6 @@ snapshots:
 
   '@developmentseed/affine@0.8.0-beta.2': {}
 
-  '@developmentseed/epsg@0.8.0-beta.2': {}
-
   '@developmentseed/geotiff@0.8.0-beta.2':
     dependencies:
       '@chunkd/middleware': 11.3.1
@@ -1167,10 +1144,6 @@ snapshots:
       '@math.gl/types': 4.1.0
 
   '@math.gl/types@4.1.0': {}
-
-  '@math.gl/web-mercator@4.1.0':
-    dependencies:
-      '@math.gl/core': 4.1.0
 
   '@oxc-project/types@0.149.0': {}
 

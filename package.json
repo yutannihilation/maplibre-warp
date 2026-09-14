@@ -17,7 +17,7 @@
     "check:fix": "biome check --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --build tsconfig.json"
+    "typecheck": "tsc --build tsconfig.json && pnpm --recursive typecheck"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.13",

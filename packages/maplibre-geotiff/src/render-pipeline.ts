@@ -188,9 +188,6 @@ function createUnormRenderer(
     if (samplesPerPixel === 3) {
       array = addAlphaChannel(array);
     }
-    if (array.layout === "band-separate") {
-      throw new Error("Band-separate images not yet implemented.");
-    }
 
     const texture = createTexture2D(options.gl, {
       width,

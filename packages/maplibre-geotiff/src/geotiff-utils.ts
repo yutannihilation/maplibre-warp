@@ -4,10 +4,9 @@
 import type {
   ConcurrencyLimiter,
   Priority,
-  RasterArray,
+  RasterArrayPixelInterleaved,
 } from "@developmentseed/geotiff";
 import { GeoTIFF } from "@developmentseed/geotiff";
-import type { Converter } from "proj4";
 
 /**
  * Add an alpha channel to an RGB image array.
@@ -16,12 +15,10 @@ import type { Converter } from "proj4";
  * is padded to RGBA before upload. Returns the input unchanged when it already
  * has four channels.
  */
-export function addAlphaChannel(rgbImage: RasterArray): RasterArray {
+export function addAlphaChannel(
+  rgbImage: RasterArrayPixelInterleaved,
+): RasterArrayPixelInterleaved {
   const { height, width } = rgbImage;
-
-  if (rgbImage.layout === "band-separate") {
-    throw new Error("Band-separate images not yet implemented.");
-  }
 
   if (rgbImage.data.length === height * width * 4) {
     return rgbImage;
@@ -69,34 +66,6 @@ export async function fetchGeoTIFF(
     return await GeoTIFF.fromArrayBuffer(input);
   }
   return input;
-}
-
-/**
- * WGS84 bounding box of a GeoTIFF, computed from all four CRS corners so
- * rotation and skew are handled.
- */
-export function getGeographicBounds(
-  geotiff: GeoTIFF,
-  converter: Converter,
-): { west: number; south: number; east: number; north: number } {
-  const [minX, minY, maxX, maxY] = geotiff.bbox;
-
-  const corners: [number, number][] = [
-    converter.forward([minX, minY]),
-    converter.forward([maxX, minY]),
-    converter.forward([maxX, maxY]),
-    converter.forward([minX, maxY]),
-  ];
-
-  const lons = corners.map((c) => c[0]);
-  const lats = corners.map((c) => c[1]);
-
-  return {
-    west: Math.min(...lons),
-    south: Math.min(...lats),
-    east: Math.max(...lons),
-    north: Math.max(...lats),
-  };
 }
 
 /** Convert a typed array to a plain `ArrayBufferView` WebGL will accept. */

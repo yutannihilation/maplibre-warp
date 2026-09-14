@@ -28,9 +28,7 @@
     "@developmentseed/affine": "0.8.0-beta.2",
     "@developmentseed/proj": "0.8.0-beta.2",
     "@developmentseed/raster-reproject": "0.8.0-beta.2",
-    "@math.gl/core": "^4.1.0",
-    "@math.gl/culling": "^4.1.0",
-    "@math.gl/web-mercator": "^4.1.0"
+    "@math.gl/culling": "^4.1.0"
   },
   "peerDependencies": {
     "maplibre-gl": "^6.7.0"
