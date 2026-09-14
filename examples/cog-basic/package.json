@@ -1,0 +1,20 @@
+{
+  "name": "cog-basic",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@maplibre-cog-warp/geotiff": "workspace:^",
+    "@maplibre-cog-warp/raster": "workspace:^",
+    "maplibre-gl": "6.7.0"
+  },
+  "devDependencies": {
+    "vite": "8.2.2"
+  }
+}

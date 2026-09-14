@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "exclude": ["node_modules"],
+  "references": [
+    { "path": "packages/maplibre-raster/tsconfig.build.json" },
+    { "path": "packages/maplibre-geotiff/tsconfig.build.json" }
+  ]
+}

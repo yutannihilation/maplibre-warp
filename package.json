@@ -1,0 +1,33 @@
+{
+  "name": "maplibre-cog-warp-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reprojecting COG rendering as a MapLibre GL JS custom layer",
+  "packageManager": "pnpm@12.3.4",
+  "scripts": {
+    "build": "pnpm --recursive --filter=\"./packages/**\" build",
+    "clean": "pnpm --recursive exec sh -c 'rm -rf dist *.tsbuildinfo'",
+    "dev": "pnpm --filter=cog-basic dev",
+    "format": "biome format .",
+    "format:fix": "biome format --write .",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
+    "check": "biome check .",
+    "check:fix": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --build tsconfig.json"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.13",
+    "@types/node": "^26.4.0",
+    "jsdom": "^30.0.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

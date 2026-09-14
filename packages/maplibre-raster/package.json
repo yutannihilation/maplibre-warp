@@ -1,0 +1,41 @@
+{
+  "name": "@maplibre-cog-warp/raster",
+  "version": "0.0.0",
+  "description": "Reprojecting raster renderer core for MapLibre GL JS custom layers",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./gpu-modules": {
+      "types": "./dist/gpu-modules/index.d.ts",
+      "default": "./dist/gpu-modules/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.build.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@developmentseed/affine": "0.8.0-beta.2",
+    "@developmentseed/proj": "0.8.0-beta.2",
+    "@developmentseed/raster-reproject": "0.8.0-beta.2",
+    "@math.gl/core": "^4.1.0",
+    "@math.gl/culling": "^4.1.0",
+    "@math.gl/web-mercator": "^4.1.0"
+  },
+  "peerDependencies": {
+    "maplibre-gl": "^6.7.0"
+  },
+  "devDependencies": {
+    "maplibre-gl": "6.7.0"
+  }
+}

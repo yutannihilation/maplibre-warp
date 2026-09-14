@@ -1,0 +1,39 @@
+{
+  "name": "@maplibre-cog-warp/geotiff",
+  "version": "0.0.0",
+  "description": "Cloud-Optimized GeoTIFF custom layer for MapLibre GL JS",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.build.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@cogeotiff/core": "^9.5.0",
+    "@developmentseed/affine": "0.8.0-beta.2",
+    "@developmentseed/epsg": "0.8.0-beta.2",
+    "@developmentseed/geotiff": "0.8.0-beta.2",
+    "@developmentseed/proj": "0.8.0-beta.2",
+    "@developmentseed/raster-reproject": "0.8.0-beta.2",
+    "@maplibre-cog-warp/raster": "workspace:^",
+    "proj4": "^2.20.9"
+  },
+  "peerDependencies": {
+    "maplibre-gl": "^6.7.0"
+  },
+  "devDependencies": {
+    "maplibre-gl": "6.7.0"
+  }
+}
