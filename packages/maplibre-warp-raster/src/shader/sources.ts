@@ -100,14 +100,25 @@ ${body}
 /**
  * Fragment shader: the module chain, then premultiplied output.
  *
+ * Besides `color` and `uv`, `main()` declares `value` and `valid` for modules
+ * that work on a scalar sample rather than a colour (the contour chain).
+ *
  * MapLibre enters custom layers with `blendFunc(ONE, ONE_MINUS_SRC_ALPHA)`, so
  * colour must be premultiplied by alpha.
  */
 export function buildFragmentSource(pipeline: RenderPipeline): string {
-  const decls = pipeline
-    .map(({ module }) => module.fsDecl)
-    .filter((s): s is string => Boolean(s))
-    .join("\n");
+  const shared = new Map<string, string>();
+  for (const { module } of pipeline) {
+    if (module.fsSharedDecl && !shared.has(module.fsSharedDecl.key)) {
+      shared.set(module.fsSharedDecl.key, module.fsSharedDecl.glsl);
+    }
+  }
+  const decls = [
+    ...shared.values(),
+    ...pipeline
+      .map(({ module }) => module.fsDecl)
+      .filter((s): s is string => Boolean(s)),
+  ].join("\n");
 
   const body = pipeline
     .map(({ module }) =>
@@ -131,6 +142,10 @@ ${decls}
 void main() {
   vec2 uv = v_uv;
   vec4 color = vec4(0.0);
+  // Set by value-seeding modules: the sample in data units, and whether the
+  // pixel holds data at all. Read by the contour modules.
+  float value = 0.0;
+  float valid = 0.0;
 
 ${body}
 

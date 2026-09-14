@@ -221,3 +221,33 @@ uniform float u_colormap_reversed;`,
     },
   }),
 };
+
+export type {
+  ContourLineProps,
+  IsobandProps,
+  ValueSamplerKind,
+  ValueTextureProps,
+} from "./contour.js";
+export {
+  ClearColor,
+  ContourLine,
+  Isoband,
+  MAX_THRESHOLDS,
+  ValueTexture,
+} from "./contour.js";
+export type {
+  BandColorFunction,
+  BandColorImage,
+  BandColors,
+  BandOptions,
+  ContourBand,
+  Rgba,
+} from "./contour-bands.js";
+export {
+  bandColorImage,
+  bandsFromThresholds,
+  colorToVec4,
+  parseCssColor,
+  resolveBandColors,
+  validateThresholds,
+} from "./contour-bands.js";
