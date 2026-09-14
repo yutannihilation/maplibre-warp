@@ -27,6 +27,15 @@ describe("ValueTexture", () => {
     }
   });
 
+  it("treats non-finite texels as missing, not only the sentinel", () => {
+    for (const kind of ["float", "uint", "int"] as const) {
+      const body = ValueTexture[kind].fsColor!;
+      // Every contributing texel is checked with isnan before it can reach
+      // the bilinear mix, since NaN is a common nodata marker in float DEMs.
+      expect(body.match(/isnan\(v(00|10|01|11)\)/g)).toHaveLength(4);
+    }
+  });
+
   it("maps props to uniforms", () => {
     const bindings = ValueTexture.float.getUniforms!({
       texture,

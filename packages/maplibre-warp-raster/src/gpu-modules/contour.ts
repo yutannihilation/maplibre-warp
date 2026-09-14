@@ -54,8 +54,8 @@ uniform vec2 u_value_size;`,
     // Manual bilinear interpolation between the four texel centres around
     // `uv`, so integer textures (which cannot be LINEAR-filtered) and float
     // textures without OES_texture_float_linear behave alike, and nodata is
-    // exact: any contributing nodata texel invalidates the pixel instead of
-    // bleeding into it.
+    // exact: any contributing nodata or NaN texel invalidates the pixel
+    // instead of bleeding into it.
     fsColor: `  {
     vec2 p = uv * u_value_size - 0.5;
     vec2 p0 = floor(p);
@@ -67,7 +67,13 @@ uniform vec2 u_value_size;`,
     float v10 = float(texelFetch(u_value_texture, ivec2(i11.x, i00.y), 0)[u_value_band]);
     float v01 = float(texelFetch(u_value_texture, ivec2(i00.x, i11.y), 0)[u_value_band]);
     float v11 = float(texelFetch(u_value_texture, ivec2(i11.x, i11.y), 0)[u_value_band]);
+    // NaN is a common nodata marker in float rasters and never equals a
+    // sentinel, so test it explicitly; a NaN texel would otherwise poison the
+    // mix and every comparison downstream.
     valid = 1.0;
+    if (isnan(v00) || isnan(v10) || isnan(v01) || isnan(v11)) {
+      valid = 0.0;
+    }
     if (u_value_has_nodata == 1 &&
         (v00 == u_value_nodata || v10 == u_value_nodata ||
          v01 == u_value_nodata || v11 == u_value_nodata)) {

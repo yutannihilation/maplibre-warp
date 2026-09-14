@@ -5,6 +5,7 @@ import type {
   ConcurrencyLimiter,
   Priority,
   RasterArrayPixelInterleaved,
+  RasterTypedArray,
 } from "@developmentseed/geotiff";
 import { GeoTIFF } from "@developmentseed/geotiff";
 
@@ -32,15 +33,19 @@ export function addAlphaChannel(
   }
 
   const rgbaLength = (rgbImage.data.length / 3) * 4;
-  const isUint16 = rgbImage.data instanceof Uint16Array;
-  const rgbaArray = isUint16
-    ? new Uint16Array(rgbaLength)
-    : new Uint8ClampedArray(rgbaLength);
-  const maxAlpha = isUint16 ? 65535 : 255;
-  for (let i = 0; i < rgbImage.data.length / 3; ++i) {
-    rgbaArray[i * 4] = rgbImage.data[i * 3]!;
-    rgbaArray[i * 4 + 1] = rgbImage.data[i * 3 + 1]!;
-    rgbaArray[i * 4 + 2] = rgbImage.data[i * 3 + 2]!;
+  const source = rgbImage.data;
+  // Keep the input's element type so the padded array still matches the
+  // texture format chosen for it; alpha is the type's "fully opaque" value.
+  const rgbaArray = new (
+    source.constructor as new (
+      n: number,
+    ) => RasterTypedArray
+  )(rgbaLength);
+  const maxAlpha = opaqueAlphaFor(source);
+  for (let i = 0; i < source.length / 3; ++i) {
+    rgbaArray[i * 4] = source[i * 3]!;
+    rgbaArray[i * 4 + 1] = source[i * 3 + 1]!;
+    rgbaArray[i * 4 + 2] = source[i * 3 + 2]!;
     rgbaArray[i * 4 + 3] = maxAlpha;
   }
 
@@ -49,6 +54,29 @@ export function addAlphaChannel(
     count: 4,
     data: rgbaArray,
   };
+}
+
+/** The value that reads as fully opaque alpha for a sample type. */
+function opaqueAlphaFor(data: RasterTypedArray): number {
+  if (data instanceof Float32Array || data instanceof Float64Array) {
+    return 1;
+  }
+  if (data instanceof Int8Array) {
+    return 127;
+  }
+  if (data instanceof Int16Array) {
+    return 32767;
+  }
+  if (data instanceof Int32Array) {
+    return 2 ** 31 - 1;
+  }
+  if (data instanceof Uint16Array) {
+    return 65535;
+  }
+  if (data instanceof Uint32Array) {
+    return 2 ** 32 - 1;
+  }
+  return 255;
 }
 
 export async function fetchGeoTIFF(
