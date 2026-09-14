@@ -195,11 +195,54 @@ export interface CreateTextureOptions {
 }
 
 /**
- * Upload a 2D texture.
+ * The pixel-store parameters a texture upload depends on.
  *
- * Pixel-store state is set explicitly and restored, because MapLibre uploads
- * its own images with `UNPACK_PREMULTIPLY_ALPHA_WEBGL` and
- * `UNPACK_FLIP_Y_WEBGL` set and we must neither inherit nor leak those.
+ * These are global GL state, and MapLibre caches its own view of them on its
+ * `Context` (`PixelStoreUnpackPremultiplyAlpha.set` returns early when the
+ * value it is asked for equals the one it last wrote). MapLibre brackets a
+ * custom layer's `render()` with `setCustomLayerDefaults()` and `setDirty()`,
+ * so state changed *during a draw* is already handled — but tile uploads
+ * happen asynchronously between frames, outside that bracket, where nothing
+ * resyncs the cache. So these functions leave the parameters exactly as they
+ * found them.
+ */
+interface PixelStoreState {
+  alignment: number;
+  flipY: boolean;
+  premultiplyAlpha: boolean;
+}
+
+/**
+ * Configure pixel storage for a raster upload: tightly packed rows, no row
+ * flip, no alpha premultiplication. Raster samples are data, not display-ready
+ * colour, and must reach the texture byte-for-byte.
+ */
+function beginPixelUpload(gl: WebGL2RenderingContext): PixelStoreState {
+  const saved: PixelStoreState = {
+    alignment: gl.getParameter(gl.UNPACK_ALIGNMENT) as number,
+    flipY: gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL) as boolean,
+    premultiplyAlpha: gl.getParameter(
+      gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,
+    ) as boolean,
+  };
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  return saved;
+}
+
+/** Restore what {@link beginPixelUpload} changed. */
+function endPixelUpload(
+  gl: WebGL2RenderingContext,
+  saved: PixelStoreState,
+): void {
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, saved.alignment);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, saved.flipY);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, saved.premultiplyAlpha);
+}
+
+/**
+ * Upload a 2D texture.
  */
 export function createTexture2D(
   gl: WebGL2RenderingContext,
@@ -215,12 +258,9 @@ export function createTexture2D(
   const previousTexture = gl.getParameter(
     gl.TEXTURE_BINDING_2D,
   ) as WebGLTexture | null;
-  const previousAlignment = gl.getParameter(gl.UNPACK_ALIGNMENT) as number;
+  const savedPixelStore = beginPixelUpload(gl);
 
   gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
 
   gl.texImage2D(
     gl.TEXTURE_2D,
@@ -240,7 +280,7 @@ export function createTexture2D(
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-  gl.pixelStorei(gl.UNPACK_ALIGNMENT, previousAlignment);
+  endPixelUpload(gl, savedPixelStore);
   gl.bindTexture(gl.TEXTURE_2D, previousTexture);
   gl.activeTexture(previousUnit);
 
@@ -267,12 +307,9 @@ export function createColormapTexture(
   const previousTexture = gl.getParameter(
     gl.TEXTURE_BINDING_2D_ARRAY,
   ) as WebGLTexture | null;
-  const previousAlignment = gl.getParameter(gl.UNPACK_ALIGNMENT) as number;
+  const savedPixelStore = beginPixelUpload(gl);
 
   gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
-  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
 
   gl.texImage3D(
     gl.TEXTURE_2D_ARRAY,
@@ -297,7 +334,7 @@ export function createColormapTexture(
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
 
-  gl.pixelStorei(gl.UNPACK_ALIGNMENT, previousAlignment);
+  endPixelUpload(gl, savedPixelStore);
   gl.bindTexture(gl.TEXTURE_2D_ARRAY, previousTexture);
   gl.activeTexture(previousUnit);
 

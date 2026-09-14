@@ -1,7 +1,11 @@
 import { SampleFormat } from "@cogeotiff/core";
 import { describe, expect, it } from "vitest";
 
-import { inferTextureFormat } from "../src/texture.js";
+import {
+  createColormapTexture,
+  createTexture2D,
+  inferTextureFormat,
+} from "../src/texture.js";
 
 /**
  * A stand-in for `WebGL2RenderingContext` that returns each enum's *name*
@@ -96,5 +100,111 @@ describe("inferTextureFormat", () => {
         inferTextureFormat(gl, channels, bits, formats),
       ).not.toThrow();
     }
+  });
+});
+
+/**
+ * A stub context that records pixel-store writes and answers `getParameter`
+ * from them, so the upload functions' state handling can be checked without a
+ * real WebGL2 context.
+ */
+function makeStubGl() {
+  const state = new Map<string, unknown>([
+    ["UNPACK_ALIGNMENT", 8],
+    ["UNPACK_FLIP_Y_WEBGL", true],
+    ["UNPACK_PREMULTIPLY_ALPHA_WEBGL", true],
+    ["ACTIVE_TEXTURE", "TEXTURE3"],
+    ["TEXTURE_BINDING_2D", "previous-2d"],
+    ["TEXTURE_BINDING_2D_ARRAY", "previous-2d-array"],
+  ]);
+  const uploadState: Record<string, unknown> = {};
+
+  const base: Record<string, unknown> = {
+    createTexture: () => ({}),
+    bindTexture: () => undefined,
+    activeTexture: () => undefined,
+    texParameteri: () => undefined,
+    pixelStorei: (pname: string, value: unknown) => {
+      state.set(pname, value);
+    },
+    getParameter: (pname: string) => state.get(pname),
+    // Snapshot the pixel-store state at the moment of upload: that, not just
+    // the end state, is what decides whether the bytes land correctly.
+    texImage2D: () => {
+      Object.assign(uploadState, readPixelStore());
+    },
+    texImage3D: () => {
+      Object.assign(uploadState, readPixelStore());
+    },
+  };
+
+  function readPixelStore() {
+    return {
+      alignment: state.get("UNPACK_ALIGNMENT"),
+      flipY: state.get("UNPACK_FLIP_Y_WEBGL"),
+      premultiply: state.get("UNPACK_PREMULTIPLY_ALPHA_WEBGL"),
+    };
+  }
+
+  const stub = new Proxy(base, {
+    get: (target, name: string) => (name in target ? target[name] : name),
+  }) as unknown as WebGL2RenderingContext;
+
+  return { gl: stub, readPixelStore, uploadState };
+}
+
+describe("texture upload pixel-store handling", () => {
+  const rgba8 = (gl: WebGL2RenderingContext) =>
+    inferTextureFormat(gl, 4, [8, 8, 8, 8], UINT);
+
+  it("uploads tightly packed, unflipped and un-premultiplied", () => {
+    const { gl, uploadState } = makeStubGl();
+    createTexture2D(gl, {
+      width: 2,
+      height: 2,
+      data: new Uint8Array(16),
+      format: rgba8(gl),
+      linear: true,
+    });
+    // Raster samples are data, not display-ready colour: any flip or
+    // premultiply would corrupt them.
+    expect(uploadState).toEqual({
+      alignment: 1,
+      flipY: false,
+      premultiply: false,
+    });
+  });
+
+  it("restores every pixel-store parameter it changed", () => {
+    const { gl, readPixelStore } = makeStubGl();
+    const before = readPixelStore();
+    createTexture2D(gl, {
+      width: 2,
+      height: 2,
+      data: new Uint8Array(16),
+      format: rgba8(gl),
+      linear: true,
+    });
+    // MapLibre caches its own view of these parameters and only resets them
+    // around a custom layer's `render()`. Tile uploads happen asynchronously,
+    // outside that bracket, so leaking here would desync its cache for good.
+    expect(readPixelStore()).toEqual(before);
+  });
+
+  it("restores pixel-store state after a colormap upload too", () => {
+    const { gl, readPixelStore, uploadState } = makeStubGl();
+    const before = readPixelStore();
+    createColormapTexture(gl, {
+      width: 256,
+      height: 1,
+      data: new Uint8ClampedArray(256 * 4),
+      colorSpace: "srgb",
+    } as ImageData);
+    expect(uploadState).toEqual({
+      alignment: 1,
+      flipY: false,
+      premultiply: false,
+    });
+    expect(readPixelStore()).toEqual(before);
   });
 });
