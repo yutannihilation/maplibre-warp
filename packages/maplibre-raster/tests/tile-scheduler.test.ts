@@ -2,6 +2,7 @@ import type { Affine } from "@developmentseed/affine";
 import { Plane } from "@math.gl/culling";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { TileSchedulerOptions } from "../src/tile-scheduler.js";
 import { TileScheduler } from "../src/tile-scheduler.js";
 import { AffineTileset } from "../src/tileset/affine-tileset.js";
 import { AffineTilesetLevel } from "../src/tileset/affine-tileset-level.js";
@@ -285,3 +286,221 @@ function parseKey(key: string): TileIndex {
   const [z, x, y] = key.split("/").map(Number);
   return { x: x!, y: y!, z: z! };
 }
+
+/** Let the loadTile promise chain settle without advancing any timers. */
+async function flush(times = 6): Promise<void> {
+  for (let i = 0; i < times; i++) {
+    await Promise.resolve();
+  }
+}
+
+describe("TileScheduler failure handling", () => {
+  const descriptor = makeDescriptor();
+  const wgs84Bounds: Bounds = [-180, -85, 180, 85];
+
+  /**
+   * A scheduler whose loads fail for the given keys. `failFor` is consulted on
+   * every attempt, so a test can let a tile start succeeding partway through.
+   */
+  function makeFailingScheduler(opts: {
+    failFor: (key: string, attempt: number) => boolean;
+    retryBaseDelay?: number;
+    maxRetries?: number;
+    onTileError?: TileSchedulerOptions<FakePayload>["onTileError"];
+  }) {
+    const calls: string[] = [];
+    const scheduler = new TileScheduler<FakePayload>({
+      descriptor,
+      wgs84Bounds,
+      retryBaseDelay: opts.retryBaseDelay ?? 0,
+      maxRetries: opts.maxRetries,
+      onTileError: opts.onTileError,
+      loadTile: (index) => {
+        const key = `${index.z}/${index.x}/${index.y}`;
+        calls.push(key);
+        const attempt = calls.filter((k) => k === key).length;
+        return opts.failFor(key, attempt)
+          ? Promise.reject(new Error(`boom ${key} #${attempt}`))
+          : Promise.resolve({ index, destroyed: false });
+      },
+      destroyTile: () => undefined,
+      byteLengthOf: () => 1000,
+    });
+    const callsFor = (key: string) => calls.filter((k) => k === key).length;
+    return { scheduler, calls, callsFor };
+  }
+
+  it("covers an errored tile with its loaded ancestor instead of leaving a hole", async () => {
+    // Level 0 loads; every level-1 tile fails.
+    const { scheduler } = makeFailingScheduler({
+      failFor: (key) => key.startsWith("1/"),
+      maxRetries: 0,
+    });
+
+    scheduler.update(makeViewport(4));
+    await flush();
+    scheduler.update(makeViewport(4));
+
+    // Zoom in: all four level-1 tiles fail, so the loaded level-0 tile must
+    // stand in for them. Before the fix this returned an empty draw list and
+    // the basemap showed through permanently.
+    scheduler.update(makeViewport(11));
+    await flush();
+    const drawn = scheduler.update(makeViewport(11));
+
+    expect(drawn.map((t) => t.index)).toEqual([{ x: 0, y: 0, z: 0 }]);
+  });
+
+  it("retries a failed tile once its backoff has elapsed", async () => {
+    // Fails once, then succeeds.
+    const { scheduler, callsFor } = makeFailingScheduler({
+      failFor: (_key, attempt) => attempt === 1,
+    });
+
+    scheduler.update(makeViewport(4));
+    await flush();
+    expect(callsFor("0/0/0")).toBe(1);
+
+    // retryBaseDelay is 0, so the next frame may retry immediately.
+    scheduler.update(makeViewport(4));
+    await flush();
+    expect(callsFor("0/0/0")).toBe(2);
+
+    // The retry succeeded, so the tile now draws and is not requested again.
+    const drawn = scheduler.update(makeViewport(4));
+    expect(drawn.map((t) => t.index)).toEqual([{ x: 0, y: 0, z: 0 }]);
+    expect(callsFor("0/0/0")).toBe(2);
+  });
+
+  it("gives up after maxRetries and stops re-requesting", async () => {
+    const { scheduler, callsFor } = makeFailingScheduler({
+      failFor: () => true,
+      maxRetries: 2,
+    });
+
+    for (let i = 0; i < 10; i++) {
+      scheduler.update(makeViewport(4));
+      await flush();
+    }
+
+    // One initial attempt plus two retries, then no more: a permanently bad
+    // tile must not turn into a request loop.
+    expect(callsFor("0/0/0")).toBe(3);
+  });
+
+  it("spaces retries exponentially", async () => {
+    vi.useFakeTimers();
+    try {
+      const { scheduler, callsFor } = makeFailingScheduler({
+        failFor: () => true,
+        retryBaseDelay: 1000,
+        maxRetries: 3,
+      });
+
+      scheduler.update(makeViewport(4));
+      await flush();
+      expect(callsFor("0/0/0")).toBe(1);
+
+      // Too early for the first retry.
+      scheduler.update(makeViewport(4));
+      await flush();
+      expect(callsFor("0/0/0")).toBe(1);
+
+      vi.advanceTimersByTime(1000);
+      scheduler.update(makeViewport(4));
+      await flush();
+      expect(callsFor("0/0/0")).toBe(2);
+
+      // The second backoff is twice as long, so the same wait is not enough.
+      vi.advanceTimersByTime(1000);
+      scheduler.update(makeViewport(4));
+      await flush();
+      expect(callsFor("0/0/0")).toBe(2);
+
+      vi.advanceTimersByTime(1000);
+      scheduler.update(makeViewport(4));
+      await flush();
+      expect(callsFor("0/0/0")).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks for a repaint when a retry falls due, so retries can run at all", async () => {
+    vi.useFakeTimers();
+    try {
+      const onNeedsRepaint = vi.fn();
+      const scheduler = new TileScheduler<FakePayload>({
+        descriptor,
+        wgs84Bounds,
+        retryBaseDelay: 1000,
+        maxRetries: 1,
+        loadTile: () => Promise.reject(new Error("boom")),
+        destroyTile: () => undefined,
+        byteLengthOf: () => 0,
+        onNeedsRepaint,
+      });
+
+      scheduler.update(makeViewport(4));
+      await flush();
+      // Nothing loaded, so without the retry nudge the layer would never
+      // repaint, never call update again, and never retry.
+      expect(onNeedsRepaint).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1000);
+      expect(onNeedsRepaint).toHaveBeenCalledTimes(1);
+
+      scheduler.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not repaint for a retry after being destroyed", async () => {
+    vi.useFakeTimers();
+    try {
+      const onNeedsRepaint = vi.fn();
+      const scheduler = new TileScheduler<FakePayload>({
+        descriptor,
+        wgs84Bounds,
+        retryBaseDelay: 1000,
+        loadTile: () => Promise.reject(new Error("boom")),
+        destroyTile: () => undefined,
+        byteLengthOf: () => 0,
+        onNeedsRepaint,
+      });
+      scheduler.update(makeViewport(4));
+      await flush();
+      scheduler.destroy();
+
+      vi.advanceTimersByTime(10000);
+      expect(onNeedsRepaint).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tells the caller whether a failure will be retried", async () => {
+    const onTileError = vi.fn();
+    const { scheduler } = makeFailingScheduler({
+      failFor: () => true,
+      maxRetries: 1,
+      onTileError,
+    });
+
+    for (let i = 0; i < 4; i++) {
+      scheduler.update(makeViewport(4));
+      await flush();
+    }
+
+    expect(onTileError).toHaveBeenCalledTimes(2);
+    expect(onTileError.mock.calls[0]?.[2]).toEqual({
+      attempt: 1,
+      willRetry: true,
+    });
+    expect(onTileError.mock.calls[1]?.[2]).toEqual({
+      attempt: 2,
+      willRetry: false,
+    });
+  });
+});

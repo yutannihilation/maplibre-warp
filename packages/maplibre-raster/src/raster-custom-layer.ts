@@ -154,13 +154,20 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
           loadTile: (index, signal) => source.loadTile(index, { gl, signal }),
           destroyTile: (payload) => payload.destroy(gl),
           byteLengthOf: (payload) => payload.byteLength,
-          // Repaint only when new data actually arrives, never per frame.
-          onTileLoaded: () => map.triggerRepaint(),
-          onTileError: (index, error) => {
-            console.error(
-              `[${this.id}] failed to load tile ${index.z}/${index.x}/${index.y}`,
-              error,
-            );
+          // Repaint when a tile arrives or a retry falls due, never per frame.
+          onNeedsRepaint: () => map.triggerRepaint(),
+          onTileError: (index, error, { attempt, willRetry }) => {
+            const tile = `tile ${index.z}/${index.x}/${index.y}`;
+            // A blip that is about to be retried is not a failure yet, so do
+            // not report it as one.
+            if (willRetry) {
+              console.warn(
+                `[${this.id}] ${tile} failed (attempt ${attempt}), retrying`,
+                error,
+              );
+            } else {
+              console.error(`[${this.id}] ${tile} failed, giving up`, error);
+            }
           },
         });
         this.onSourceReady?.(source);

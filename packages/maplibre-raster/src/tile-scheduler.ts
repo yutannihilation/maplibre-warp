@@ -27,7 +27,18 @@ export interface SchedulerTile<PayloadT> {
   byteLength: number;
   /** Frame counter at last use, for LRU. */
   lastUsed: number;
-  readonly controller: AbortController;
+  /**
+   * The controller for the *current* attempt. Replaced on each retry, so a
+   * settled promise from a superseded attempt can be recognised and ignored.
+   */
+  controller: AbortController;
+  /** Failed attempts so far. Reset to 0 once the tile loads. */
+  attempts: number;
+  /**
+   * Epoch milliseconds after which an errored tile may be retried.
+   * `Infinity` once the retry budget is spent.
+   */
+  retryAt: number;
 }
 
 export interface TileSchedulerOptions<PayloadT> {
@@ -40,10 +51,27 @@ export interface TileSchedulerOptions<PayloadT> {
   destroyTile(payload: PayloadT): void;
   /** Bytes the payload occupies, used for the cache cap. */
   byteLengthOf(payload: PayloadT): number;
-  /** Called when a tile finishes loading, so the layer can repaint. */
-  onTileLoaded?(): void;
-  /** Called when a tile fails for a reason other than abort. */
-  onTileError?(index: TileIndex, error: unknown): void;
+  /**
+   * Called when something has changed that the layer should redraw for: a tile
+   * finished loading, or a failed tile's backoff elapsed so a retry is now due.
+   *
+   * The retry case matters because retries are driven by {@link update}, which
+   * the layer only calls while repainting. Without this nudge a view whose
+   * tiles all failed would never repaint, so it would never retry and the
+   * failure would look permanent.
+   */
+  onNeedsRepaint?(): void;
+  /**
+   * Called when a tile fails for a reason other than abort, on every failed
+   * attempt. `willRetry` distinguishes a transient failure that will be tried
+   * again from the final one, so callers can log at the right level instead of
+   * treating a blip as fatal.
+   */
+  onTileError?(
+    index: TileIndex,
+    error: unknown,
+    info: { attempt: number; willRetry: boolean },
+  ): void;
   /**
    * Soft cap on retained payload bytes. Tiles not needed by the current frame
    * are evicted least-recently-used-first once the cap is exceeded.
@@ -62,12 +90,32 @@ export interface TileSchedulerOptions<PayloadT> {
    * @default 512
    */
   maxCacheSize?: number;
+  /**
+   * Delay before the first retry of a failed tile, in milliseconds. Each
+   * further failure doubles it.
+   *
+   * @default 1000
+   */
+  retryBaseDelay?: number;
+  /**
+   * How many times to retry a failed tile before giving up on it.
+   *
+   * Retries matter because a tile that stays errored is never re-requested,
+   * so a single transient failure would otherwise leave that footprint
+   * permanently missing. The backoff keeps a struggling server from being
+   * hammered once per frame by every failing tile.
+   *
+   * @default 3
+   */
+  maxRetries?: number;
   /** Elevation range in metres, or null for a flat raster. */
   zRange?: ZRange | null;
 }
 
 const DEFAULT_MAX_CACHE_BYTE_SIZE = 256 * 1024 * 1024;
 const DEFAULT_MAX_CACHE_SIZE = 512;
+const DEFAULT_RETRY_BASE_DELAY = 1000;
+const DEFAULT_MAX_RETRIES = 3;
 
 /** A tile the layer should draw this frame, in painter order. */
 export interface DrawableTile<PayloadT> {
@@ -80,7 +128,10 @@ export class TileScheduler<PayloadT> {
   private readonly boundingVolumeCache = new BoundingVolumeCache();
   private readonly maxCacheByteSize: number;
   private readonly maxCacheSize: number;
+  private readonly retryBaseDelay: number;
+  private readonly maxRetries: number;
   private readonly zRange: ZRange | null;
+  private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
   private frame = 0;
   private destroyed = false;
 
@@ -88,6 +139,8 @@ export class TileScheduler<PayloadT> {
     this.maxCacheByteSize =
       options.maxCacheByteSize ?? DEFAULT_MAX_CACHE_BYTE_SIZE;
     this.maxCacheSize = options.maxCacheSize ?? DEFAULT_MAX_CACHE_SIZE;
+    this.retryBaseDelay = options.retryBaseDelay ?? DEFAULT_RETRY_BASE_DELAY;
+    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.zRange = options.zRange ?? null;
   }
 
@@ -150,10 +203,13 @@ export class TileScheduler<PayloadT> {
       }
       if (!tile) {
         this.startLoad(index);
+      } else if (tile.state === "error" && Date.now() >= tile.retryAt) {
+        this.startLoad(index);
       }
-      if (tile?.state !== "error") {
-        missing.push(index);
-      }
+      // Everything not drawable this frame needs ancestor cover, errored tiles
+      // included. Skipping them left a failed tile's footprint as a permanent
+      // hole showing the basemap, even with its parent overview already loaded.
+      missing.push(index);
     }
 
     for (const index of missing) {
@@ -172,9 +228,27 @@ export class TileScheduler<PayloadT> {
     return [...drawing.values()].sort((a, b) => a.index.z - b.index.z);
   }
 
+  /**
+   * Ask the layer to repaint once `delay` has passed, so the retry this frame
+   * scheduled actually gets a chance to run.
+   */
+  private scheduleRetryRepaint(delay: number): void {
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(timer);
+      if (!this.destroyed) {
+        this.options.onNeedsRepaint?.();
+      }
+    }, delay);
+    this.retryTimers.add(timer);
+  }
+
   /** Abort every in-flight load and free every payload. */
   destroy(): void {
     this.destroyed = true;
+    for (const timer of this.retryTimers) {
+      clearTimeout(timer);
+    }
+    this.retryTimers.clear();
     for (const tile of this.tiles.values()) {
       tile.controller.abort();
       if (tile.payload !== undefined) {
@@ -216,25 +290,40 @@ export class TileScheduler<PayloadT> {
     return [...indices].sort((a, b) => distance(a) - distance(b));
   }
 
+  /**
+   * Start, or retry, the load for one tile.
+   *
+   * A retry reuses the existing entry so the attempt count and backoff survive
+   * across attempts.
+   */
   private startLoad(index: TileIndex): void {
     const key = tileKey(index);
     const controller = new AbortController();
-    const tile: SchedulerTile<PayloadT> = {
+    const tile: SchedulerTile<PayloadT> = this.tiles.get(key) ?? {
       key,
       index,
       state: "loading",
       byteLength: 0,
       lastUsed: this.frame,
       controller,
+      attempts: 0,
+      retryAt: 0,
     };
+    tile.state = "loading";
+    tile.controller = controller;
+    tile.lastUsed = this.frame;
     this.tiles.set(key, tile);
 
     this.options
       .loadTile(index, controller.signal)
       .then((payload) => {
-        // Evicted (and therefore aborted) while the load was in flight, or the
-        // whole scheduler went away: drop the result rather than leaking it.
-        if (this.destroyed || this.tiles.get(key) !== tile) {
+        // Evicted while in flight, superseded by a retry, or the whole
+        // scheduler went away: drop the result rather than leaking it.
+        if (
+          this.destroyed ||
+          this.tiles.get(key) !== tile ||
+          tile.controller !== controller
+        ) {
           this.options.destroyTile(payload);
           return;
         }
@@ -242,12 +331,14 @@ export class TileScheduler<PayloadT> {
         tile.state = "loaded";
         tile.byteLength = this.options.byteLengthOf(payload);
         tile.lastUsed = this.frame;
-        this.options.onTileLoaded?.();
+        tile.attempts = 0;
+        tile.retryAt = 0;
+        this.options.onNeedsRepaint?.();
       })
       .catch((error: unknown) => {
-        // The entry may already have been replaced by a newer request for the
-        // same key; never clobber that one.
-        if (this.tiles.get(key) !== tile) {
+        // The entry may already have been replaced, or this attempt superseded
+        // by a retry; never clobber the newer one.
+        if (this.tiles.get(key) !== tile || tile.controller !== controller) {
           return;
         }
         if (controller.signal.aborted) {
@@ -255,7 +346,19 @@ export class TileScheduler<PayloadT> {
           return;
         }
         tile.state = "error";
-        this.options.onTileError?.(index, error);
+        tile.attempts++;
+        const willRetry = tile.attempts <= this.maxRetries;
+        const delay = this.retryBaseDelay * 2 ** (tile.attempts - 1);
+        tile.retryAt = willRetry
+          ? Date.now() + delay
+          : Number.POSITIVE_INFINITY;
+        if (willRetry) {
+          this.scheduleRetryRepaint(delay);
+        }
+        this.options.onTileError?.(index, error, {
+          attempt: tile.attempts,
+          willRetry,
+        });
       });
   }
 
