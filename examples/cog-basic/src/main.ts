@@ -17,6 +17,7 @@ maplibregl.setWorkerUrl(workerUrl);
 const LAYER_ID = "cog";
 
 const statusEl = document.getElementById("status") as HTMLDivElement;
+const legendEl = document.getElementById("legend") as HTMLDivElement;
 const selectEl = document.getElementById("dataset") as HTMLSelectElement;
 const projectionEl = document.getElementById("projection") as HTMLSelectElement;
 
@@ -61,6 +62,7 @@ function showDataset(dataset: Dataset): void {
   current = new COGLayer({
     id: LAYER_ID,
     geotiff: dataset.url,
+    contour: dataset.contour,
     onGeoTIFFLoad: (geotiff, { projection, geographicBounds }) => {
       const headerMs = Math.round(performance.now() - started);
       statusEl.textContent = [
@@ -81,6 +83,25 @@ function showDataset(dataset: Dataset): void {
   });
 
   map.addLayer(current, firstSymbolLayerId());
+  renderLegend(current);
+}
+
+/** Legend from the layer's band model: a swatch and a range per band. */
+function renderLegend(layer: COGLayer): void {
+  legendEl.replaceChildren(
+    ...layer.getBands().flatMap((band) => {
+      const swatch = document.createElement("i");
+      swatch.style.background = band.color;
+      const label = document.createElement("span");
+      label.textContent =
+        band.min === undefined
+          ? `< ${band.max}`
+          : band.max === undefined
+            ? `≥ ${band.min}`
+            : `${band.min} – ${band.max}`;
+      return [swatch, label];
+    }),
+  );
 }
 
 let styleReady = false;
