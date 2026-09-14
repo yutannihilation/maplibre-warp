@@ -9,8 +9,6 @@ import type {
 } from "maplibre-gl";
 
 import { splitFloat64 } from "./fp64.js";
-import type { SavedGlState } from "./gl-state.js";
-import { restoreGlState, saveGlState } from "./gl-state.js";
 import { mercatorFromLngLat } from "./mercator.js";
 import type { GpuMesh } from "./mesh.js";
 import type { RenderPipeline } from "./shader/module.js";
@@ -64,6 +62,34 @@ export interface RasterCustomLayerProps {
  *
  * `renderingMode` is `"2d"`: MapLibre then gives the layer read-only depth,
  * which is what a flat raster wants.
+ *
+ * ## GL state
+ *
+ * {@link render} deliberately does **not** save and restore GL state, because
+ * MapLibre 6 brackets every custom-layer draw itself (`draw_custom.ts`):
+ *
+ * - Before the call, `painter.setCustomLayerDefaults()` unbinds the vertex
+ *   array and resets cull face (to disabled), the active texture unit (to
+ *   `TEXTURE0`) and all three `UNPACK_*` pixel-store parameters to their
+ *   defaults. So the incoming state is known, and the layer does not need to
+ *   disable face culling itself even though a south-up source geotransform
+ *   flips its mesh winding.
+ * - After the call, `context.setDirty()` marks *every* value MapLibre caches
+ *   as dirty, including the program, the active texture unit, the texture,
+ *   array-buffer, element-buffer and vertex-array bindings, and cull face. So
+ *   anything left bound here is re-bound by MapLibre before it is next used.
+ *
+ * Restoring would therefore only duplicate work MapLibre has already
+ * committed to, at the cost of a `gl.getParameter` round trip per value per
+ * frame — and `getParameter` stalls the pipeline on many drivers.
+ *
+ * The one caveat is that `drawCustom` has no `try`/`finally`, so a throw out
+ * of {@link render} skips `setDirty()`. That path leaves the frame broken
+ * regardless, since the exception propagates out of MapLibre's render loop.
+ *
+ * This does **not** extend to tile uploads: those run asynchronously between
+ * frames, outside MapLibre's bracket, and restore the state they touch
+ * themselves.
  */
 export abstract class RasterCustomLayer implements CustomLayerInterface {
   readonly id: string;
@@ -191,20 +217,11 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
       origin[1],
     );
 
-    const saved = saveGlState(gl);
-    // The warped mesh's winding depends on the source geotransform (a
-    // south-up affine flips it), so face culling must be off.
-    gl.disable(gl.CULL_FACE);
-
-    try {
-      this.drawTiles(gl, args, drawList, {
-        projectionMatrix,
-        originHigh: new Float32Array([originXHigh, originYHigh]),
-        originLow: new Float32Array([originXLow, originYLow]),
-      });
-    } finally {
-      restoreGlState(gl, saved satisfies SavedGlState);
-    }
+    this.drawTiles(gl, args, drawList, {
+      projectionMatrix,
+      originHigh: new Float32Array([originXHigh, originYHigh]),
+      originLow: new Float32Array([originXLow, originYLow]),
+    });
   }
 
   private drawTiles(
@@ -242,6 +259,9 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
         0,
       );
     }
+    // Leave no VAO bound: `setCustomLayerDefaults` unbinds it for the *next*
+    // custom layer, but MapLibre's own layers in this frame run first, and a
+    // stray binding would capture their `vertexAttribPointer` calls.
     gl.bindVertexArray(null);
   }
 }

@@ -43,7 +43,7 @@ and the data reaches the GPU unquantised.
 
 | Package | What it is |
 | --- | --- |
-| `@maplibre-cog-warp/raster` | Renderer core: the custom-layer base class, tile scheduler, warp mesh, shader assembly, GL-state discipline. Source-format agnostic. |
+| `@maplibre-cog-warp/raster` | Renderer core: the custom-layer base class, tile scheduler, warp mesh, shader assembly and program cache. Source-format agnostic. |
 | `@maplibre-cog-warp/geotiff` | COG specifics: opening the file, building the tile pyramid, inferring a render pipeline from TIFF tags, texture formats. |
 
 `examples/cog-basic` is a Vite app with three datasets that exercise different
@@ -94,10 +94,17 @@ Per-tile local origins are what produce cracks along tile edges.
 
 ### Playing nicely with MapLibre
 
-MapLibre draws its own layers after ours in the same frame, so the layer saves
-and restores everything it touches: program, VAO, array buffer, active texture
-unit and the first eight texture bindings, and face culling. It uses **plain
-`gl.uniform*`, never uniform blocks** — a custom layer that rebinds UBO binding
+MapLibre brackets every custom-layer draw itself: `setCustomLayerDefaults()`
+before (which unbinds the VAO and resets cull face, the active texture unit and
+the `UNPACK_*` pixel-store parameters) and `context.setDirty()` after (which
+invalidates its entire cached view of GL state, so anything left bound is
+re-bound before MapLibre next uses it). The layer therefore does **not** save
+and restore state around a draw — that would only duplicate work MapLibre has
+already committed to, at a `gl.getParameter` stall per value per frame.
+Asynchronous tile uploads are a different matter: they run between frames,
+outside that bracket, and restore the pixel-store parameters they touch.
+
+The layer uses **plain `gl.uniform*`, never uniform blocks** — a custom layer that rebinds UBO binding
 points 0–2 corrupts every MapLibre layer drawn after it
 ([maplibre-gl-js#8413](https://github.com/maplibre/maplibre-gl-js/issues/8413)).
 Output is premultiplied alpha, matching the `blendFunc(ONE, ONE_MINUS_SRC_ALPHA)`

@@ -1,6 +1,4 @@
 export { splitFloat64, splitFloat64Array } from "./fp64.js";
-export type { SavedGlState } from "./gl-state.js";
-export { MAX_TEXTURE_UNITS, restoreGlState, saveGlState } from "./gl-state.js";
 export {
   COMMON_SPACE_SIZE,
   commonSpaceFromLngLat,
