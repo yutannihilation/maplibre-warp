@@ -40,6 +40,22 @@
         color: #444;
         white-space: pre-line;
       }
+      #legend {
+        margin-top: 8px;
+        display: grid;
+        grid-template-columns: 14px auto;
+        gap: 2px 8px;
+        align-items: center;
+      }
+      #legend:empty {
+        display: none;
+      }
+      #legend i {
+        display: block;
+        width: 14px;
+        height: 14px;
+        border: 1px solid rgba(0, 0, 0, 0.2);
+      }
     </style>
   </head>
   <body>
@@ -54,6 +70,7 @@
         <option value="vertical-perspective">vertical-perspective</option>
       </select>
       <div id="status">loading…</div>
+      <div id="legend"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
