@@ -20,6 +20,10 @@ export default defineConfig({
     // Longest specifier first — Vite matches these in order.
     alias: [
       {
+        find: "@yutannihilation/maplibre-warp-contour",
+        replacement: src("maplibre-warp-contour/src/index.ts"),
+      },
+      {
         find: "@yutannihilation/maplibre-warp-raster/gpu-modules",
         replacement: src("maplibre-warp-raster/src/gpu-modules/index.ts"),
       },

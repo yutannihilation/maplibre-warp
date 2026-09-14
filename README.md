@@ -45,12 +45,15 @@ and the data reaches the GPU unquantised.
 | --- | --- |
 | `@yutannihilation/maplibre-warp-raster` | Renderer core: the custom-layer base class, tile scheduler, warp mesh, shader assembly and program cache. Source-format agnostic. |
 | `@yutannihilation/maplibre-warp-geotiff` | COG specifics: opening the file, building the tile pyramid, inferring a render pipeline from TIFF tags, texture formats. |
+| `@yutannihilation/maplibre-warp-contour` | Contour **vector tiles** (filled bands and lines) generated in a worker from a COG in any CRS, served to MapLibre through `addProtocol` so they are styled with ordinary fill and line layers. |
 
-`examples/cog-basic` is a Vite app with three datasets that exercise different
+`examples/cog-basic` is a Vite app with five datasets that exercise different
 paths: swisstopo PK1000 (EPSG:2056 oblique Mercator, RGB), NLCD land cover
-(Albers Equal Area, palette + nodata) and a Tennessee orthophoto (EPSG:2274
-State Plane in US survey feet, grayscale + nodata). A projection selector
-switches the map between mercator, globe and vertical-perspective.
+(Albers Equal Area, palette + nodata), a Tennessee orthophoto (EPSG:2274
+State Plane in US survey feet, grayscale + nodata), and two float32 DEMs
+(swissALTI3D in EPSG:2056, USGS 3DEP in EPSG:4326) shown as contour
+vector layers with a legend. A projection selector switches the map between
+mercator, globe and vertical-perspective.
 
 ```bash
 pnpm install
@@ -134,6 +137,45 @@ that matters — **every tile in a frame uses the same origin**, so a vertex
 shared by two adjacent tiles goes through bit-identical arithmetic in both.
 Per-tile local origins are what produce cracks along tile edges.
 
+### Contours as vector tiles
+
+`COGContourSource` turns a single-band raster into MapLibre vector tiles on
+demand, so contours are styled with the style specification and work with
+`queryRenderedFeatures`, terrain and globe like any vector layer:
+
+```ts
+import { COGContourSource } from "@yutannihilation/maplibre-warp-contour";
+
+const contours = new COGContourSource({
+  id: "dem-contours",            // protocol name → dem-contours://{z}/{x}/{y}.mvt
+  geotiff: "https://example.com/dem.tif",
+  thresholds: [200, 400, 600, 800],
+});
+contours.register(maplibregl);
+map.addSource("contours", await contours.getSourceSpecification());
+map.addLayer({
+  id: "bands", type: "fill", source: "contours", "source-layer": "bands",
+  paint: { "fill-color": ["match", ["get", "band"], 0, "#cde", 1, "#9bc", 2, "#68a", "#357"] },
+});
+map.addLayer({
+  id: "lines", type: "line", source: "contours", "source-layer": "lines",
+  paint: { "line-width": ["case", ["==", ["%", ["get", "index"], 5], 0], 1.5, 0.5] },
+});
+```
+
+Source layers: `bands` (properties `band`, `min`, `max`) and `lines`
+(`level`, `index`). `getBands()` returns the band model for legends.
+
+For each requested XYZ tile the source picks the overview whose resolution
+matches, resamples the raster onto a mercator-aligned sample grid whose outer
+edge is the tile buffer (so no clipping is needed and neighbouring tiles agree
+exactly along shared edges), runs marching squares on that grid, and encodes
+MVT. The inverse projection is evaluated on a coarse lattice and interpolated,
+so a tile costs a few hundred proj4 calls rather than 66k. Everything runs in
+a module worker that opens its own copy of the COG; pass `worker: false` to
+stay on the calling thread. See `docs/adr/0001-*.md` for the reasoning and
+the alternatives considered.
+
 ### Playing nicely with MapLibre
 
 MapLibre brackets every custom-layer draw itself: `setCustomLayerDefaults()`
@@ -160,9 +202,10 @@ loading, never per frame.
   float32 mercator and jitter from around z14 — the same limit MapLibre's own
   layers have there. The `globe` projection is unaffected: it renders flat
   mercator above z12, where the relative-to-centre path takes over.
-- **8-bit unsigned samples only.** 16/32-bit and signed/float rasters throw an
-  explicit error rather than rendering something wrong; they need the integer-
-  sampler path. The texture-format table already covers them.
+- **8-bit unsigned samples only (render layer).** 16/32-bit and signed/float
+  rasters throw an explicit error rather than rendering something wrong; they
+  need the integer-sampler path. The texture-format table already covers them.
+  The contour source has no such limit — it works on decoded arrays.
 - **No terrain draping.** MapLibre renders custom layers directly rather than
   through its render-to-texture pass, so with `map.setTerrain` active the raster
   stays flat at z = 0. Same limitation as deck.gl's interleaved mode.

@@ -1,22 +1,36 @@
+import { COGContourSource } from "@yutannihilation/maplibre-warp-contour";
 import { COGLayer } from "@yutannihilation/maplibre-warp-geotiff";
 import * as maplibregl from "maplibre-gl";
+// The contour source's worker, bundled by Vite. The library's default
+// `new URL("./worker.js", import.meta.url)` works against the built package;
+// the example runs from sources, so hand it the bundled source module.
+// biome-ignore lint/correctness/useImportExtensions: Vite `?worker` query import
+import ContourWorker from "../../../packages/maplibre-warp-contour/src/worker.ts?worker";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import type { LayerSpecification, ProjectionSpecification } from "maplibre-gl";
+import type {
+  ExpressionSpecification,
+  LayerSpecification,
+  ProjectionSpecification,
+} from "maplibre-gl";
 // maplibre-gl v6 resolves its worker through a dynamic `new URL()`, which no
 // bundler can statically analyse, so the worker chunk is never emitted and the
 // production build 404s on it. Bundle it explicitly and hand over the URL, as
 // MapLibre's own Vite guidance prescribes.
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
-import type { Dataset } from "./datasets.js";
+import type { ContourConfig, Dataset } from "./datasets.js";
 import { DATASETS } from "./datasets.js";
 
 maplibregl.setWorkerUrl(workerUrl);
 
 const LAYER_ID = "cog";
+const CONTOUR_SOURCE_ID = "cog-contours";
+const CONTOUR_FILL_ID = "cog-contour-bands";
+const CONTOUR_LINE_ID = "cog-contour-lines";
 
 const statusEl = document.getElementById("status") as HTMLDivElement;
+const legendEl = document.getElementById("legend") as HTMLDivElement;
 const selectEl = document.getElementById("dataset") as HTMLSelectElement;
 const projectionEl = document.getElementById("projection") as HTMLSelectElement;
 
@@ -49,15 +63,146 @@ function firstSymbolLayerId(): string | undefined {
 }
 
 let current: COGLayer | undefined;
+let currentContours: COGContourSource | undefined;
+
+function removeContours(): void {
+  for (const id of [CONTOUR_LINE_ID, CONTOUR_FILL_ID]) {
+    if (map.getLayer(id)) {
+      map.removeLayer(id);
+    }
+  }
+  if (map.getSource(CONTOUR_SOURCE_ID)) {
+    map.removeSource(CONTOUR_SOURCE_ID);
+  }
+  currentContours?.destroy();
+  currentContours = undefined;
+  legendEl.replaceChildren();
+}
+
+/**
+ * Add the contour vector source plus a fill layer coloured per band and a
+ * line layer with thicker major lines, all through the MapLibre style spec.
+ */
+async function showContours(
+  dataset: Dataset,
+  config: ContourConfig,
+  started: number,
+): Promise<void> {
+  const contours = new COGContourSource({
+    id: `contours-${dataset.id}`,
+    geotiff: dataset.url,
+    thresholds: config.thresholds,
+    includeLower: config.includeLower,
+    includeUpper: config.includeUpper,
+    createWorker: () => new ContourWorker(),
+  });
+  contours.register(maplibregl);
+  currentContours = contours;
+
+  const spec = await contours.getSourceSpecification();
+  if (currentContours !== contours) {
+    contours.destroy();
+    return;
+  }
+  const bands = contours.getBands();
+  if (bands.length !== config.colors.length) {
+    throw new Error(
+      `${bands.length} bands but ${config.colors.length} colours configured`,
+    );
+  }
+
+  map.addSource(CONTOUR_SOURCE_ID, spec);
+  const before = firstSymbolLayerId();
+  // MapLibre's tuple typing for `match` cannot express a spread of pairs.
+  const fillColor = [
+    "match",
+    ["get", "band"],
+    ...bands.flatMap((band, k) => [band.band, config.colors[k]!]),
+    "rgba(0, 0, 0, 0)",
+  ] as unknown as ExpressionSpecification;
+  map.addLayer(
+    {
+      id: CONTOUR_FILL_ID,
+      type: "fill",
+      source: CONTOUR_SOURCE_ID,
+      "source-layer": "bands",
+      paint: {
+        "fill-color": fillColor,
+        "fill-opacity": 0.75,
+        "fill-antialias": false,
+      },
+    },
+    before,
+  );
+  const major = config.majorEvery ?? 5;
+  map.addLayer(
+    {
+      id: CONTOUR_LINE_ID,
+      type: "line",
+      source: CONTOUR_SOURCE_ID,
+      "source-layer": "lines",
+      paint: {
+        "line-color": "rgba(60, 40, 20, 0.8)",
+        "line-width": [
+          "case",
+          ["==", ["%", ["get", "index"], major], 0],
+          1.4,
+          0.5,
+        ],
+      },
+    },
+    before,
+  );
+
+  legendEl.replaceChildren(
+    ...bands.flatMap((band, k) => {
+      const swatch = document.createElement("i");
+      swatch.style.background = config.colors[k]!;
+      const label = document.createElement("span");
+      label.textContent =
+        band.min === undefined
+          ? `< ${band.max}`
+          : band.max === undefined
+            ? `≥ ${band.min}`
+            : `${band.min} – ${band.max}`;
+      return [swatch, label];
+    }),
+  );
+
+  const [west, south, east, north] = spec.bounds!;
+  map.fitBounds(
+    [
+      [west, south],
+      [east, north],
+    ],
+    { padding: 24, duration: 0 },
+  );
+  statusEl.textContent = [
+    dataset.note,
+    `contour source: z${spec.minzoom}–z${spec.maxzoom}, ${bands.length} bands`,
+    `header read in ${Math.round(performance.now() - started)} ms`,
+  ].join("\n");
+}
 
 function showDataset(dataset: Dataset): void {
   if (map.getLayer(LAYER_ID)) {
     map.removeLayer(LAYER_ID);
   }
+  removeContours();
 
   statusEl.textContent = `${dataset.note}\nopening COG…`;
 
   const started = performance.now();
+  if (dataset.contour) {
+    showContours(dataset, dataset.contour, started).catch((error: unknown) => {
+      console.error("[contours]", error);
+      statusEl.textContent = `${dataset.note}\ncontour source failed: ${String(error)}`;
+    });
+  }
+  if (dataset.render === false) {
+    current = undefined;
+    return;
+  }
   current = new COGLayer({
     id: LAYER_ID,
     geotiff: dataset.url,
@@ -143,7 +288,11 @@ map.on("error", (event: { error: unknown }) => {
 declare global {
   interface Window {
     /** Exposed for browser-driven verification. */
-    __cog: { map: maplibregl.Map; layer: () => COGLayer | undefined };
+    __cog: {
+      map: maplibregl.Map;
+      layer: () => COGLayer | undefined;
+      contours: () => COGContourSource | undefined;
+    };
   }
 }
-window.__cog = { map, layer: () => current };
+window.__cog = { map, layer: () => current, contours: () => currentContours };

@@ -5,6 +5,8 @@ export {
   imageForLevel,
 } from "./geotiff-tileset.js";
 export { addAlphaChannel, fetchGeoTIFF, toGlView } from "./geotiff-utils.js";
+export type { OpenCOGOptions, OpenedCOG } from "./open-cog.js";
+export { openCOG } from "./open-cog.js";
 export type {
   GeoTiffRenderer,
   GeoTiffTileTextures,

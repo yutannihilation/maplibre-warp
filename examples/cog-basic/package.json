@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@yutannihilation/maplibre-warp-contour": "workspace:^",
     "@yutannihilation/maplibre-warp-geotiff": "workspace:^",
     "@yutannihilation/maplibre-warp-raster": "workspace:^",
     "maplibre-gl": "6.7.0"
