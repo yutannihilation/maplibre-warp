@@ -51,6 +51,7 @@ export type {
   DrawableTile,
   SchedulerTile,
   TileSchedulerOptions,
+  TileSchedulerUpdateOptions,
   TileState,
 } from "./tile-scheduler.js";
 export { TileScheduler, tileKey } from "./tile-scheduler.js";

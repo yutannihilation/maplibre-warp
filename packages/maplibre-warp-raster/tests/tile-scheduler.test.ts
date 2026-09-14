@@ -2,6 +2,7 @@ import type { Affine } from "@developmentseed/affine";
 import { Plane } from "@math.gl/culling";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { rescaleEPSG3857ToCommonSpace } from "../src/mercator.js";
 import type { TileSchedulerOptions } from "../src/tile-scheduler.js";
 import { TileScheduler } from "../src/tile-scheduler.js";
 import { AffineTileset } from "../src/tileset/affine-tileset.js";
@@ -55,12 +56,46 @@ function makeDescriptor(): AffineTileset {
   });
 }
 
-/** A viewport whose frustum contains everything, at a chosen zoom. */
-function makeViewport(zoom: number): RasterViewport {
+/**
+ * Like {@link makeDescriptor} with a third level: 4×4 tiles at 256 m/px, so a
+ * view can select tiles two levels below the root.
+ */
+function makeThreeLevelDescriptor(): AffineTileset {
+  const base = makeDescriptor();
+  return new AffineTileset({
+    levels: [
+      ...base.levels,
+      new AffineTilesetLevel({
+        affine: [256, 0, 0, 0, -256, 262144],
+        arrayWidth: 1024,
+        arrayHeight: 1024,
+        tileWidth: 256,
+        tileHeight: 256,
+        mpu: 1,
+      }),
+    ],
+    projectTo3857: base.projectTo3857,
+    projectFrom3857: base.projectFrom3857,
+    projectTo4326: base.projectTo4326,
+    projectFrom4326: base.projectFrom4326,
+  });
+}
+
+/**
+ * A viewport whose frustum contains everything, at a chosen zoom.
+ *
+ * `maxX3857` clips the frustum on the right, in EPSG:3857 metres, so a test
+ * can leave the right-hand tiles of the test pyramid out of view.
+ */
+function makeViewport(zoom: number, maxX3857?: number): RasterViewport {
   const far = 1e9;
+  const rightPlane =
+    maxX3857 === undefined
+      ? new Plane([-1, 0, 0], far)
+      : new Plane([-1, 0, 0], rescaleEPSG3857ToCommonSpace([maxX3857, 0])[0]);
   const frustumPlanes = [
     new Plane([1, 0, 0], far),
-    new Plane([-1, 0, 0], far),
+    rightPlane,
     new Plane([0, 1, 0], far),
     new Plane([0, -1, 0], far),
     new Plane([0, 0, 1], far),
@@ -90,22 +125,36 @@ describe("TileScheduler", () => {
   let resolvers: Map<string, (payload: FakePayload) => void>;
   let aborted: string[];
   let destroyed: TileIndex[];
+  /** Every `loadTile` call, in order, as `z/x/y`. */
+  let calls: string[];
 
   beforeEach(() => {
     resolvers = new Map();
     aborted = [];
     destroyed = [];
+    calls = [];
   });
 
-  function makeScheduler(maxCacheByteSize?: number, maxCacheSize?: number) {
+  function makeScheduler(
+    overrides: Partial<
+      Pick<
+        TileSchedulerOptions<FakePayload>,
+        | "descriptor"
+        | "maxCacheByteSize"
+        | "maxCacheSize"
+        | "maxConcurrentRequests"
+        | "lodBias"
+      >
+    > = {},
+  ) {
     return new TileScheduler<FakePayload>({
       descriptor,
       wgs84Bounds,
-      maxCacheByteSize,
-      maxCacheSize,
+      ...overrides,
       loadTile: (index, signal) =>
         new Promise<FakePayload>((resolve, reject) => {
           const key = `${index.z}/${index.x}/${index.y}`;
+          calls.push(key);
           resolvers.set(key, resolve);
           signal.addEventListener("abort", () => {
             aborted.push(key);
@@ -189,7 +238,7 @@ describe("TileScheduler", () => {
 
   it("evicts least-recently-used tiles over the byte cap and frees them", async () => {
     // Cap of 1000 bytes: one tile fits, so loading a second must evict.
-    const scheduler = makeScheduler(1000);
+    const scheduler = makeScheduler({ maxCacheByteSize: 1000 });
     scheduler.update(makeViewport(11));
     await settle("1/0/0");
     await settle("1/1/1");
@@ -198,24 +247,178 @@ describe("TileScheduler", () => {
     // Both are in use this frame, so nothing is evicted yet.
     expect(destroyed).toHaveLength(0);
 
-    // A frame that needs neither of them: the cap now bites.
-    const narrow = makeViewport(4);
-    scheduler.update(narrow);
-    expect(destroyed.length).toBeGreaterThan(0);
+    // A frame over the left-hand tiles only: the right-hand one is neither
+    // drawn nor related to anything selected, so the cap now bites.
+    scheduler.update(makeViewport(11, 60000));
+    expect(destroyed).toEqual([{ x: 1, y: 1, z: 1 }]);
     expect(scheduler.byteSize).toBeLessThanOrEqual(1000);
   });
 
-  it("aborts a still-loading tile when it is evicted", async () => {
-    const scheduler = makeScheduler(0, 0);
+  it("keeps off-screen loads running while under the in-flight cap", () => {
+    // Default cap of 6: the four level-1 loads fit even once two of them have
+    // panned out of view, so a user panning back and forth is not made to
+    // restart the same requests.
+    const scheduler = makeScheduler();
     scheduler.update(makeViewport(11));
-    await settle("1/0/0");
-    // Cap is 0, so the next frame evicts everything not being drawn.
-    scheduler.update(makeViewport(4));
-    await Promise.resolve();
-    expect(aborted.length).toBeGreaterThan(0);
+    scheduler.update(makeViewport(11, 60000));
+    expect(aborted).toEqual([]);
+    expect(scheduler.loadingCount).toBe(4);
   });
 
-  it("destroys a payload that arrives after its tile was evicted", async () => {
+  it("aborts off-screen loads once over the in-flight cap and re-requests them when reselected", () => {
+    const scheduler = makeScheduler({ maxConcurrentRequests: 3 });
+    scheduler.update(makeViewport(11));
+    expect(scheduler.loadingCount).toBe(4);
+
+    // Pan so only the left-hand column is in view: four in flight, one over
+    // the cap, so one of the two right-hand loads goes. The selected loads
+    // are untouchable.
+    scheduler.update(makeViewport(11, 60000));
+    expect(aborted).toHaveLength(1);
+    expect(aborted[0]!.startsWith("1/1/")).toBe(true);
+    expect(scheduler.loadingCount).toBe(3);
+
+    // Pan back: the pruned entry is gone, so it is requested afresh rather
+    // than mistaken for still-loading.
+    const pruned = [...aborted];
+    scheduler.update(makeViewport(11));
+    for (const key of pruned) {
+      expect(calls.filter((k) => k === key)).toHaveLength(2);
+    }
+  });
+
+  it("keeps in-flight loads that still overlap the view when the level changes", () => {
+    // Zoomed in with all four level-1 loads in flight, then out to where the
+    // root is selected: every level-1 tile still lies under it, and will be
+    // drawn as a stand-in the moment it lands, so none is cancelled even
+    // with no in-flight allowance at all. Cancelling them made a small
+    // zoom-out throw away seconds of loading for tiles still on screen.
+    const scheduler = makeScheduler({ maxConcurrentRequests: 0 });
+    scheduler.update(makeViewport(11));
+    scheduler.update(makeViewport(4));
+    expect(aborted).toEqual([]);
+    expect(scheduler.loadingCount).toBe(5);
+  });
+
+  it("draws loaded finer tiles as stand-ins while a coarser selected tile loads", async () => {
+    const scheduler = makeScheduler();
+    scheduler.update(makeViewport(11));
+    for (const key of ["1/0/0", "1/0/1", "1/1/0", "1/1/1"]) {
+      await settle(key);
+    }
+
+    // Zoom out: the root is selected and loading. The detail already on
+    // screen stays up rather than vanishing until the root arrives.
+    const drawn = scheduler.update(makeViewport(4));
+    expect(drawn.map((t) => t.index.z)).toEqual([1, 1, 1, 1]);
+    expect(calls).toContain("0/0/0");
+
+    // Once the root lands it takes over and the finer tiles are not drawn.
+    await settle("0/0/0");
+    const settled = scheduler.update(makeViewport(4));
+    expect(settled.map((t) => t.index)).toEqual([{ x: 0, y: 0, z: 0 }]);
+  });
+
+  it("starts no loads while suspended but still draws stand-ins", async () => {
+    const scheduler = makeScheduler();
+    scheduler.update(makeViewport(4));
+    await settle("0/0/0");
+
+    // Mid-zoom: nothing new is requested, yet the loaded ancestor covers.
+    const drawn = scheduler.update(makeViewport(11), { suspendLoads: true });
+    expect(drawn.map((t) => t.index)).toEqual([{ x: 0, y: 0, z: 0 }]);
+    expect(calls).toEqual(["0/0/0"]);
+
+    // Zoom settled: the deferred loads start.
+    scheduler.update(makeViewport(11));
+    expect(calls).toHaveLength(5);
+  });
+
+  it("still prunes off-screen loads while suspended", () => {
+    const scheduler = makeScheduler({ maxConcurrentRequests: 0 });
+    scheduler.update(makeViewport(11));
+    scheduler.update(makeViewport(11, 60000), { suspendLoads: true });
+    expect(aborted.sort()).toEqual(["1/1/0", "1/1/1"]);
+    expect(calls).toHaveLength(4);
+  });
+
+  it("selects a coarser level with a positive lodBias", () => {
+    // At zoom 11 the root's pixels are ~27 framebuffer pixels wide, so
+    // without a bias it subdivides (see "selects a finer level"). A bias of
+    // five zoom levels allows 32, and the root suffices.
+    const scheduler = makeScheduler({ lodBias: 5 });
+    scheduler.update(makeViewport(11));
+    expect(calls).toEqual(["0/0/0"]);
+  });
+
+  it("keeps loaded ancestors of selected tiles when the cap bites", async () => {
+    // Four level-1 tiles fill the cap; the root is the fifth.
+    const scheduler = makeScheduler({ maxCacheSize: 4 });
+    scheduler.update(makeViewport(4));
+    await settle("0/0/0");
+    scheduler.update(makeViewport(11));
+    for (const key of ["1/0/0", "1/0/1", "1/1/0", "1/1/1"]) {
+      await settle(key);
+    }
+
+    // With every level-1 tile loaded the root is not drawn, and was the LRU
+    // tile — the one eviction used to take, and the one the next zoom-out
+    // needs first.
+    scheduler.update(makeViewport(11));
+    expect(destroyed).toEqual([]);
+
+    const drawn = scheduler.update(makeViewport(4));
+    expect(drawn.map((t) => t.index)).toEqual([{ x: 0, y: 0, z: 0 }]);
+    expect(calls).toHaveLength(5);
+  });
+
+  describe("with loads in flight", () => {
+    /**
+     * Root and all four level-1 tiles loaded, then a view over the left
+     * quarter of the pyramid at a zoom that wants level 2: four level-2 loads
+     * start, the left-hand level-1 tiles stand in, and the right-hand level-1
+     * tiles are the only loaded tiles nothing wants.
+     */
+    async function zoomIntoLeftHalf(maxCacheSize: number) {
+      const scheduler = makeScheduler({
+        descriptor: makeThreeLevelDescriptor(),
+        maxCacheSize,
+      });
+      scheduler.update(makeViewport(4));
+      await settle("0/0/0");
+      scheduler.update(makeViewport(7));
+      for (const key of ["1/0/0", "1/0/1", "1/1/0", "1/1/1"]) {
+        await settle(key);
+      }
+      const drawn = scheduler.update(makeViewport(11, 60000));
+      expect(scheduler.loadingCount).toBe(4);
+      expect(
+        drawn.map((t) => `${t.index.z}/${t.index.x}/${t.index.y}`).sort(),
+      ).toEqual(["1/0/0", "1/0/1"]);
+      return scheduler;
+    }
+
+    it("does not count them against the cache cap", async () => {
+      // Five loaded tiles under a cap of five: nothing may go, even though
+      // four more are loading. Counting those used to evict the two loaded
+      // right-hand tiles, which then had to be fetched again on zoom-out —
+      // behind the very burst that evicted them.
+      await zoomIntoLeftHalf(5);
+      expect(destroyed).toEqual([]);
+    });
+
+    it("evicts only loaded tiles that are neither drawn nor ancestors", async () => {
+      const scheduler = await zoomIntoLeftHalf(3);
+      expect(destroyed.map((i) => `${i.z}/${i.x}/${i.y}`).sort()).toEqual([
+        "1/1/0",
+        "1/1/1",
+      ]);
+      expect(aborted).toEqual([]);
+      expect(scheduler.loadingCount).toBe(4);
+    });
+  });
+
+  it("destroys a payload that arrives after its tile was pruned", async () => {
     // A loader that ignores its abort signal — a decoder already past the
     // point of no return, which is exactly when a payload can outlive its
     // tile entry and leak GPU memory.
@@ -223,11 +426,10 @@ describe("TileScheduler", () => {
     const scheduler = new TileScheduler<FakePayload>({
       descriptor,
       wgs84Bounds,
-      maxCacheByteSize: 0,
-      maxCacheSize: 0,
+      maxConcurrentRequests: 0,
       loadTile: (index) =>
         new Promise<FakePayload>((resolve) => {
-          if (index.z === 1 && index.x === 0 && index.y === 0) {
+          if (index.z === 1 && index.x === 1 && index.y === 0) {
             resolveLate = resolve;
           }
         }),
@@ -240,12 +442,13 @@ describe("TileScheduler", () => {
     scheduler.update(makeViewport(11));
     expect(resolveLate).toBeDefined();
 
-    // A frame that wants none of the level-1 tiles evicts them mid-flight.
-    scheduler.update(makeViewport(4));
-    scheduler.update(makeViewport(4));
+    // A frame over the left-hand column only prunes the right-hand loads
+    // mid-flight.
+    scheduler.update(makeViewport(11, 60000));
+    scheduler.update(makeViewport(11, 60000));
 
     const payload: FakePayload = {
-      index: { x: 0, y: 0, z: 1 },
+      index: { x: 1, y: 0, z: 1 },
       destroyed: false,
     };
     resolveLate!(payload);

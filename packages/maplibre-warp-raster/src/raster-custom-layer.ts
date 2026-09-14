@@ -52,8 +52,32 @@ export interface RasterCustomLayerProps {
   opacity?: number;
   /** Soft cap on retained GPU bytes. @default 256 MiB */
   maxCacheByteSize?: number;
-  /** Soft cap on the number of retained tiles. @default 512 */
+  /**
+   * Soft cap on the number of retained tiles. Loads in flight are not
+   * counted; see `maxConcurrentRequests`. @default 512
+   */
   maxCacheSize?: number;
+  /**
+   * How many tile loads may be in flight before loads for tiles that have
+   * scrolled off screen are aborted. Loads still overlapping the view are
+   * kept whatever their level, since they draw as stand-ins when they land.
+   * Match it to the source's per-origin request limit (six for HTTP/1.1);
+   * anything queued beyond that limit is only waiting, and aborting it is
+   * free.
+   *
+   * @default 6
+   */
+  maxConcurrentRequests?: number;
+  /**
+   * Level-of-detail bias in zoom levels. `0` picks the coarsest overview whose
+   * source pixels are no larger than one framebuffer pixel, which is sharp but
+   * fetches many tiles on HiDPI displays. Each `+1` allows source pixels twice
+   * as large and roughly quarters the tile count; `1` matches what
+   * deck.gl-raster fetches for the same view.
+   *
+   * @default 0
+   */
+  lodBias?: number;
   /** Elevation range in metres, or null for a flat raster. @default null */
   zRange?: ZRange | null;
   /**
@@ -137,6 +161,8 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
   opacity: number;
   private readonly maxCacheByteSize: number | undefined;
   private readonly maxCacheSize: number | undefined;
+  private readonly maxConcurrentRequests: number | undefined;
+  private readonly lodBias: number | undefined;
   private readonly retryBaseDelay: number;
   private readonly maxRetries: number;
   private readonly zRange: ZRange | null;
@@ -146,6 +172,8 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     this.opacity = props.opacity ?? 1;
     this.maxCacheByteSize = props.maxCacheByteSize;
     this.maxCacheSize = props.maxCacheSize;
+    this.maxConcurrentRequests = props.maxConcurrentRequests;
+    this.lodBias = props.lodBias;
     this.retryBaseDelay = props.retryBaseDelay ?? DEFAULT_RETRY_BASE_DELAY;
     this.maxRetries = props.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.zRange = props.zRange ?? null;
@@ -174,8 +202,17 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     const controller = new AbortController();
     this.sourceController = controller;
 
+    // `render` starts no loads while the map is zooming, and MapLibre does not
+    // repaint on its own once the zoom settles, so the deferred loads need
+    // this nudge or they would wait for the next unrelated repaint.
+    map.on("zoomend", this.repaintOnZoomEnd);
+
     void this.openSource(map, gl, controller.signal);
   }
+
+  private readonly repaintOnZoomEnd = (): void => {
+    this.map?.triggerRepaint();
+  };
 
   /**
    * Open the source, retrying on failure with the same backoff the tile loads
@@ -237,6 +274,8 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
       zRange: this.zRange,
       maxCacheByteSize: this.maxCacheByteSize,
       maxCacheSize: this.maxCacheSize,
+      maxConcurrentRequests: this.maxConcurrentRequests,
+      lodBias: this.lodBias,
       retryBaseDelay: this.retryBaseDelay,
       maxRetries: this.maxRetries,
       loadTile: (index, signal) => source.loadTile(index, { gl, signal }),
@@ -262,7 +301,8 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     map.triggerRepaint();
   }
 
-  onRemove(_map: MapLibreMap, _gl: WebGL2RenderingContext): void {
+  onRemove(map: MapLibreMap, _gl: WebGL2RenderingContext): void {
+    map.off("zoomend", this.repaintOnZoomEnd);
     this.sourceController?.abort();
     this.scheduler?.destroy();
     this.programs?.destroy();
@@ -291,7 +331,12 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     }
 
     const viewport = createRasterViewport(map, args, gl);
-    const drawList = scheduler.update(viewport);
+    // Every intermediate zoom of an animation selects a level the user will
+    // not end up looking at, so defer new loads until the zoom settles;
+    // `repaintOnZoomEnd` then triggers the frame that starts them.
+    const drawList = scheduler.update(viewport, {
+      suspendLoads: map.isZooming(),
+    });
     if (drawList.length === 0) {
       return;
     }

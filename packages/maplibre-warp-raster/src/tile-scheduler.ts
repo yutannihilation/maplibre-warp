@@ -73,23 +73,55 @@ export interface TileSchedulerOptions<PayloadT> {
     info: { attempt: number; willRetry: boolean },
   ): void;
   /**
-   * Soft cap on retained payload bytes. Tiles not needed by the current frame
-   * are evicted least-recently-used-first once the cap is exceeded.
+   * Soft cap on retained payload bytes. Loaded tiles not needed by the current
+   * frame are evicted least-recently-used-first once the cap is exceeded.
    *
    * @default 268435456 (256 MiB)
    */
   maxCacheByteSize?: number;
   /**
-   * Soft cap on the number of retained tiles, applied alongside
-   * {@link maxCacheByteSize}.
+   * Soft cap on the number of retained settled (loaded or errored) tiles,
+   * applied alongside {@link maxCacheByteSize}.
    *
-   * Both caps are needed: a tile that is still loading holds no payload bytes
-   * yet, so a byte-only cap would never evict — and therefore never abort —
-   * requests for tiles the view has long since left behind.
+   * Tiles still loading are not counted: they are bounded separately by
+   * {@link maxConcurrentRequests}. Counting them here let a burst of requests
+   * for a fine level push every loaded coarse tile out of the cache, which
+   * then had to be re-fetched — behind that same burst — as soon as the user
+   * zoomed back out.
    *
    * @default 512
    */
   maxCacheSize?: number;
+  /**
+   * How many loads may be in flight before loads for tiles that have left the
+   * view are aborted, least-recently-wanted first.
+   *
+   * Requests are serviced by a small per-origin connection pool (six for
+   * HTTP/1.1), in arrival order. Without pruning, tiles the view has panned
+   * away from queue ahead of the ones it now needs, and the user waits
+   * through all of them. Pruning only above this threshold keeps a handful of
+   * just-scrolled-past loads alive, so panning back and forth does not cancel
+   * and restart the same request over and over. Aborting a request that is
+   * still queued in the pool costs nothing.
+   *
+   * A load whose tile still overlaps a selected tile is never pruned, even
+   * when it is at a different level: it will be drawn as a stand-in the
+   * moment it lands (see {@link MAX_STAND_IN_DEPTH}), and it is what the user
+   * gets back on zooming in again. Cancelling those made a small zoom-out
+   * throw away seconds of loading for tiles that were still on screen.
+   *
+   * @default 6
+   */
+  maxConcurrentRequests?: number;
+  /**
+   * Level-of-detail bias in zoom levels, passed through to tile selection.
+   * `0` selects the coarsest level whose source pixels are no larger than one
+   * framebuffer pixel; each `+1` allows source pixels twice as large, roughly
+   * quartering the number of tiles fetched. Fractional values are allowed.
+   *
+   * @default 0
+   */
+  lodBias?: number;
   /**
    * Delay before the first retry of a failed tile, in milliseconds. Each
    * further failure doubles it.
@@ -112,8 +144,33 @@ export interface TileSchedulerOptions<PayloadT> {
   zRange?: ZRange | null;
 }
 
+/** Per-frame options for {@link TileScheduler.update}. */
+export interface TileSchedulerUpdateOptions {
+  /**
+   * Start no new loads this frame; only draw what is already loaded, with
+   * ancestor stand-ins for the rest. Loads for tiles no longer selected are
+   * still pruned.
+   *
+   * The layer sets this while the map is zooming. Every intermediate zoom of
+   * an animation selects a different level, and none of those levels is the
+   * one the user will end up looking at; requesting them only delays the
+   * final level. The caller must arrange a repaint once the zoom settles so
+   * the deferred loads start.
+   */
+  suspendLoads?: boolean;
+}
+
 const DEFAULT_MAX_CACHE_BYTE_SIZE = 256 * 1024 * 1024;
 const DEFAULT_MAX_CACHE_SIZE = 512;
+const DEFAULT_MAX_CONCURRENT_REQUESTS = 6;
+/**
+ * How many levels finer than a selected tile loaded descendants may be and
+ * still stand in for it while it loads. Deeper than this the tiles get too
+ * numerous to look up, and too small to be worth it. The same depth bounds
+ * which in-flight finer loads {@link TileScheduler.pruneLoads} keeps.
+ */
+export const MAX_STAND_IN_DEPTH = 2;
+const DEFAULT_LOD_BIAS = 0;
 const DEFAULT_RETRY_BASE_DELAY = 1000;
 const DEFAULT_MAX_RETRIES = 3;
 
@@ -128,6 +185,8 @@ export class TileScheduler<PayloadT> {
   private readonly boundingVolumeCache = new BoundingVolumeCache();
   private readonly maxCacheByteSize: number;
   private readonly maxCacheSize: number;
+  private readonly maxConcurrentRequests: number;
+  private readonly lodBias: number;
   private readonly retryBaseDelay: number;
   private readonly maxRetries: number;
   private readonly zRange: ZRange | null;
@@ -139,6 +198,9 @@ export class TileScheduler<PayloadT> {
     this.maxCacheByteSize =
       options.maxCacheByteSize ?? DEFAULT_MAX_CACHE_BYTE_SIZE;
     this.maxCacheSize = options.maxCacheSize ?? DEFAULT_MAX_CACHE_SIZE;
+    this.maxConcurrentRequests =
+      options.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS;
+    this.lodBias = options.lodBias ?? DEFAULT_LOD_BIAS;
     this.retryBaseDelay = options.retryBaseDelay ?? DEFAULT_RETRY_BASE_DELAY;
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.zRange = options.zRange ?? null;
@@ -147,6 +209,17 @@ export class TileScheduler<PayloadT> {
   /** Number of tiles currently held (in any state). */
   get size(): number {
     return this.tiles.size;
+  }
+
+  /** Number of tiles whose load is in flight. */
+  get loadingCount(): number {
+    let total = 0;
+    for (const tile of this.tiles.values()) {
+      if (tile.state === "loading") {
+        total++;
+      }
+    }
+    return total;
   }
 
   /** Bytes currently attributed to loaded tiles. */
@@ -163,10 +236,15 @@ export class TileScheduler<PayloadT> {
    * tiles to draw, coarsest first.
    *
    * Tiles that are selected but not yet loaded are stood in for by the nearest
-   * loaded ancestor(s) that cover them, so panning and zooming never open
-   * holes. Ancestors are drawn before finer tiles, which then paint over them.
+   * loaded ancestor(s) that cover them and by any loaded descendants up to
+   * {@link MAX_STAND_IN_DEPTH} levels finer, so panning and zooming never open
+   * holes and a zoom-out keeps showing the detail it already has. Coarser
+   * tiles are drawn first, so finer ones paint over them.
    */
-  update(viewport: RasterViewport): DrawableTile<PayloadT>[] {
+  update(
+    viewport: RasterViewport,
+    { suspendLoads = false }: TileSchedulerUpdateOptions = {},
+  ): DrawableTile<PayloadT>[] {
     if (this.destroyed) {
       return [];
     }
@@ -178,6 +256,7 @@ export class TileScheduler<PayloadT> {
       maxZ: descriptor.levels.length - 1,
       zRange: this.zRange,
       wgs84Bounds,
+      lodBias: this.lodBias,
       boundingVolumeCache: this.boundingVolumeCache,
     });
 
@@ -187,10 +266,12 @@ export class TileScheduler<PayloadT> {
     const sorted = this.sortByDistanceToCentre(selected, viewport);
 
     const drawing = new Map<string, DrawableTile<PayloadT>>();
+    const selectedKeys = new Set<string>();
     const missing: TileIndex[] = [];
 
     for (const index of sorted) {
       const key = tileKey(index);
+      selectedKeys.add(key);
       const tile = this.tiles.get(key);
       if (tile) {
         // Touch every selected tile, loaded or not, so eviction never drops
@@ -201,10 +282,12 @@ export class TileScheduler<PayloadT> {
         drawing.set(key, { index, payload: tile.payload });
         continue;
       }
-      if (!tile) {
-        this.startLoad(index);
-      } else if (tile.state === "error" && Date.now() >= tile.retryAt) {
-        this.startLoad(index);
+      if (!suspendLoads) {
+        if (!tile) {
+          this.startLoad(index);
+        } else if (tile.state === "error" && Date.now() >= tile.retryAt) {
+          this.startLoad(index);
+        }
       }
       // Everything not drawable this frame needs ancestor cover, errored tiles
       // included. Skipping them left a failed tile's footprint as a permanent
@@ -212,15 +295,24 @@ export class TileScheduler<PayloadT> {
       missing.push(index);
     }
 
+    const selectedFootprints = this.footprintsOf(sorted);
+
+    // Prune before anything else can queue behind the stale loads.
+    this.pruneLoads(selectedKeys, selectedFootprints);
+
     for (const index of missing) {
-      for (const ancestor of this.findLoadedAncestors(index)) {
-        const key = tileKey(ancestor.index);
+      for (const standIn of [
+        ...this.findLoadedAncestors(index),
+        ...this.findLoadedDescendants(index),
+      ]) {
+        const key = tileKey(standIn.index);
         if (!drawing.has(key)) {
-          drawing.set(key, ancestor);
+          drawing.set(key, standIn);
         }
       }
     }
 
+    this.protectAncestors(selectedFootprints);
     this.evict(drawing);
 
     // Painter order: coarse (low z) first, so finer tiles paint over the
@@ -318,8 +410,8 @@ export class TileScheduler<PayloadT> {
     this.options
       .loadTile(index, controller.signal)
       .then((payload) => {
-        // Evicted while in flight, superseded by a retry, or the whole
-        // scheduler went away: drop the result rather than leaking it.
+        // Pruned or evicted while in flight, superseded by a retry, or the
+        // whole scheduler went away: drop the result rather than leaking it.
         if (
           this.destroyed ||
           this.tiles.get(key) !== tile ||
@@ -364,18 +456,57 @@ export class TileScheduler<PayloadT> {
   }
 
   /**
-   * Find the loaded tiles at the nearest coarser level that cover `index`.
+   * Abort in-flight loads for tiles that have left the view, least recently
+   * wanted first, until no more than `maxConcurrentRequests` loads remain in
+   * flight or every such load is gone.
    *
-   * The pyramid is a stack of independent grids rather than a quadtree, so
-   * "the parent" is the set of tiles at level z−1 whose extent overlaps this
-   * tile's source-CRS bounds. We walk coarser until a level yields at least one
-   * loaded covering tile.
+   * A load is kept — however many are in flight — if its tile is selected, or
+   * if it overlaps a selected tile and is coarser than it or at most
+   * {@link MAX_STAND_IN_DEPTH} levels finer: those are the tiles that will be
+   * drawn as stand-ins when they land. Everything else has scrolled off
+   * screen.
+   *
+   * Pruned entries are removed immediately rather than waiting for the
+   * rejection to arrive, so a tile that is reselected next frame is requested
+   * afresh instead of being taken for still-loading.
    */
-  private findLoadedAncestors(index: TileIndex): DrawableTile<PayloadT>[] {
-    const { levels } = this.options.descriptor;
-    const level = levels[index.z];
+  private pruneLoads(
+    selectedKeys: Set<string>,
+    selectedFootprints: Footprint[],
+  ): void {
+    let inFlight = 0;
+    const candidates: SchedulerTile<PayloadT>[] = [];
+    for (const tile of this.tiles.values()) {
+      if (tile.state !== "loading") {
+        continue;
+      }
+      inFlight++;
+      if (
+        !selectedKeys.has(tile.key) &&
+        !this.overlapsSelection(tile.index, selectedFootprints)
+      ) {
+        candidates.push(tile);
+      }
+    }
+    if (inFlight <= this.maxConcurrentRequests) {
+      return;
+    }
+    candidates.sort((a, b) => a.lastUsed - b.lastUsed);
+    for (const tile of candidates) {
+      if (inFlight <= this.maxConcurrentRequests) {
+        break;
+      }
+      tile.controller.abort();
+      this.tiles.delete(tile.key);
+      inFlight--;
+    }
+  }
+
+  /** This tile's extent in the source CRS, as an axis-aligned box. */
+  private crsBoundsOf(index: TileIndex): Bounds | null {
+    const level = this.options.descriptor.levels[index.z];
     if (!level) {
-      return [];
+      return null;
     }
     const corners = level.projectedTileCorners(index.x, index.y);
     const xs = [
@@ -390,31 +521,92 @@ export class TileScheduler<PayloadT> {
       corners.bottomLeft[1],
       corners.bottomRight[1],
     ];
-    const bounds: Bounds = [
-      Math.min(...xs),
-      Math.min(...ys),
-      Math.max(...xs),
-      Math.max(...ys),
-    ];
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  }
 
-    for (let z = index.z - 1; z >= 0; z--) {
-      const coarser = levels[z];
-      if (!coarser) {
-        continue;
-      }
-      const { minCol, maxCol, minRow, maxRow } = coarser.crsBoundsToTileRange(
-        ...bounds,
-      );
-      const found: DrawableTile<PayloadT>[] = [];
-      for (let y = minRow; y <= maxRow; y++) {
-        for (let x = minCol; x <= maxCol; x++) {
-          const tile = this.tiles.get(tileKey({ x, y, z }));
-          if (tile?.state === "loaded" && tile.payload !== undefined) {
-            tile.lastUsed = this.frame;
-            found.push({ index: { x, y, z }, payload: tile.payload });
-          }
+  /**
+   * The loaded tiles at level `z` whose extent overlaps `bounds`, each touched
+   * as used this frame.
+   *
+   * The pyramid is a stack of independent grids rather than a quadtree, so
+   * "the parent" is a set of overlapping tiles, not a single index.
+   */
+  private loadedTilesCovering(
+    bounds: Bounds,
+    z: number,
+  ): DrawableTile<PayloadT>[] {
+    const level = this.options.descriptor.levels[z];
+    if (!level) {
+      return [];
+    }
+    const { minCol, maxCol, minRow, maxRow } = level.crsBoundsToTileRange(
+      ...bounds,
+    );
+    const found: DrawableTile<PayloadT>[] = [];
+    for (let y = minRow; y <= maxRow; y++) {
+      for (let x = minCol; x <= maxCol; x++) {
+        const tile = this.tiles.get(tileKey({ x, y, z }));
+        if (tile?.state === "loaded" && tile.payload !== undefined) {
+          tile.lastUsed = this.frame;
+          found.push({ index: { x, y, z }, payload: tile.payload });
         }
       }
+    }
+    return found;
+  }
+
+  /** Source-CRS footprints of `indices`, skipping any at an unknown level. */
+  private footprintsOf(indices: TileIndex[]): Footprint[] {
+    const footprints: Footprint[] = [];
+    for (const index of indices) {
+      const bounds = this.crsBoundsOf(index);
+      if (bounds) {
+        footprints.push({ z: index.z, bounds });
+      }
+    }
+    return footprints;
+  }
+
+  /**
+   * Whether `index` overlaps a selected tile that it could stand in for: one
+   * it is coarser than, or finer than by at most {@link MAX_STAND_IN_DEPTH}.
+   */
+  private overlapsSelection(
+    index: TileIndex,
+    selectedFootprints: Footprint[],
+  ): boolean {
+    const bounds = this.crsBoundsOf(index);
+    if (!bounds) {
+      return false;
+    }
+    for (const selected of selectedFootprints) {
+      if (
+        index.z - selected.z <= MAX_STAND_IN_DEPTH &&
+        boundsOverlap(bounds, selected.bounds)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Find the loaded tiles at the nearest finer level that overlap `index`,
+   * walking down to {@link MAX_STAND_IN_DEPTH} levels until one yields any.
+   *
+   * These are what keeps a zoom-out looking sharp: the detail already on
+   * screen stays up until the coarser tile that replaces it has arrived,
+   * rather than dropping to whatever ancestor happens to be cached.
+   */
+  private findLoadedDescendants(index: TileIndex): DrawableTile<PayloadT>[] {
+    const bounds = this.crsBoundsOf(index);
+    if (!bounds) {
+      return [];
+    }
+    const maxZ = this.options.descriptor.levels.length - 1;
+    const deepest = Math.min(index.z + MAX_STAND_IN_DEPTH, maxZ);
+    for (let z = index.z + 1; z <= deepest; z++) {
+      const found = this.loadedTilesCovering(bounds, z);
       if (found.length > 0) {
         return found;
       }
@@ -423,30 +615,75 @@ export class TileScheduler<PayloadT> {
   }
 
   /**
-   * Drop least-recently-used tiles until the cache is back under its cap.
+   * Find the loaded tiles at the nearest coarser level that cover `index`,
+   * walking coarser until a level yields at least one.
+   */
+  private findLoadedAncestors(index: TileIndex): DrawableTile<PayloadT>[] {
+    const bounds = this.crsBoundsOf(index);
+    if (!bounds) {
+      return [];
+    }
+    for (let z = index.z - 1; z >= 0; z--) {
+      const found = this.loadedTilesCovering(bounds, z);
+      if (found.length > 0) {
+        return found;
+      }
+    }
+    return [];
+  }
+
+  /**
+   * Mark every loaded ancestor of every selected tile, at every coarser level,
+   * as used this frame so eviction leaves them alone.
    *
-   * Tiles this frame touched — drawn, or selected and still loading — are
-   * never evicted. Evicting a tile that is still loading aborts its request,
-   * which is the only place we abort: a tile that merely scrolled out of view
-   * keeps loading, because a user panning back and forth would otherwise
-   * cancel and restart the same request over and over.
+   * With a fine level fully loaded, its ancestors are not drawn and would
+   * otherwise be the least recently used tiles in the cache — the first to go
+   * when the cap bites. They are exactly the tiles the next zoom-out draws,
+   * and they cost little to keep.
+   */
+  private protectAncestors(selectedFootprints: Footprint[]): void {
+    for (const { z: selectedZ, bounds } of selectedFootprints) {
+      for (let z = selectedZ - 1; z >= 0; z--) {
+        this.loadedTilesCovering(bounds, z);
+      }
+    }
+  }
+
+  /**
+   * Drop least-recently-used settled tiles until the cache is back under its
+   * caps.
+   *
+   * Tiles this frame touched — drawn, selected, or an ancestor of a selected
+   * tile — are never evicted. Loads in flight are neither counted nor evicted
+   * here; {@link pruneLoads} bounds them.
    */
   private evict(inUse: Map<string, DrawableTile<PayloadT>>): void {
-    let bytes = this.byteSize;
-    let count = this.tiles.size;
+    let bytes = 0;
+    let count = 0;
+    for (const tile of this.tiles.values()) {
+      if (tile.state === "loading") {
+        continue;
+      }
+      count++;
+      bytes += tile.byteLength;
+    }
     if (bytes <= this.maxCacheByteSize && count <= this.maxCacheSize) {
       return;
     }
 
     const candidates = [...this.tiles.values()]
-      .filter((tile) => !inUse.has(tile.key) && tile.lastUsed !== this.frame)
+      .filter(
+        (tile) =>
+          tile.state !== "loading" &&
+          !inUse.has(tile.key) &&
+          tile.lastUsed !== this.frame,
+      )
       .sort((a, b) => a.lastUsed - b.lastUsed);
 
     for (const tile of candidates) {
       if (bytes <= this.maxCacheByteSize && count <= this.maxCacheSize) {
         break;
       }
-      tile.controller.abort();
       if (tile.payload !== undefined) {
         this.options.destroyTile(tile.payload);
       }
@@ -459,4 +696,15 @@ export class TileScheduler<PayloadT> {
 
 export function tileKey({ x, y, z }: TileIndex): string {
   return `${z}/${x}/${y}`;
+}
+
+/** A tile's level and its extent in the source CRS. */
+interface Footprint {
+  z: number;
+  bounds: Bounds;
+}
+
+/** Whether two `[minX, minY, maxX, maxY]` boxes share any interior. */
+function boundsOverlap(a: Bounds, b: Bounds): boolean {
+  return a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1];
 }
