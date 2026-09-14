@@ -6,6 +6,12 @@ const src = (path: string) =>
 
 export default defineConfig({
   server: { port: 5173 },
+  worker: {
+    // `@developmentseed/geotiff`'s decoder pool worker pulls in a WASM decoder
+    // that uses top-level await, which the default `iife` worker output cannot
+    // express. ES module workers can.
+    format: "es",
+  },
   resolve: {
     // Resolve the workspace packages to their TypeScript sources rather than
     // their published `dist/` entry points. Without this the example cannot be

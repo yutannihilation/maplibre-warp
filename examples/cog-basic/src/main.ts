@@ -3,9 +3,16 @@ import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 import type { LayerSpecification } from "maplibre-gl";
+// maplibre-gl v6 resolves its worker through a dynamic `new URL()`, which no
+// bundler can statically analyse, so the worker chunk is never emitted and the
+// production build 404s on it. Bundle it explicitly and hand over the URL, as
+// MapLibre's own Vite guidance prescribes.
+import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
 import type { Dataset } from "./datasets.js";
 import { DATASETS } from "./datasets.js";
+
+maplibregl.setWorkerUrl(workerUrl);
 
 const LAYER_ID = "cog";
 
