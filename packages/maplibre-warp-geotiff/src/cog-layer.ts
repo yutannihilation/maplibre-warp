@@ -8,15 +8,7 @@ import {
   PerOriginSemaphore,
 } from "@developmentseed/geotiff";
 import type { EpsgResolver, ProjectionDefinition } from "@developmentseed/proj";
-import {
-  epsgResolver as defaultEpsgResolver,
-  makeClampedForwardTo3857,
-  metersPerUnit,
-  parseWkt,
-  transformBounds,
-} from "@developmentseed/proj";
 import type {
-  Bounds,
   Point,
   RasterCustomLayerProps,
   RasterSource,
@@ -29,14 +21,12 @@ import {
   DEFAULT_MAX_ERROR,
   epsg3857FromMercator,
   GpuMesh,
-  MAX_WEB_MERCATOR_LAT,
   mercatorFromEPSG3857,
   RasterCustomLayer,
 } from "@yutannihilation/maplibre-warp-raster";
 import type { Map as MapLibreMap } from "maplibre-gl";
-import proj4 from "proj4";
-import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
-import { fetchGeoTIFF } from "./geotiff-utils.js";
+import { imageForLevel } from "./geotiff-tileset.js";
+import { openCOG } from "./open-cog.js";
 import type { GeoTiffRenderer } from "./render-pipeline.js";
 import { inferRenderPipeline } from "./render-pipeline.js";
 
@@ -140,78 +130,26 @@ export class COGLayer extends RasterCustomLayer {
     this.renderer = undefined;
     this.geotiff = undefined;
 
-    const geotiff = await fetchGeoTIFF(this.props.geotiff, {
+    const opened = await openCOG(this.props.geotiff, {
+      epsgResolver: this.props.epsgResolver,
       concurrencyLimiter:
         this.props.concurrencyLimiter === undefined
           ? DEFAULT_CONCURRENCY_LIMITER
           : this.props.concurrencyLimiter,
       signal,
     });
-    if (signal.aborted) {
+    if (!opened) {
       return null;
     }
+    const {
+      geotiff,
+      descriptor,
+      sourceProjection,
+      projectTo4326,
+      rawBounds,
+      wgs84Bounds,
+    } = opened;
     this.geotiff = geotiff;
-
-    const crs = geotiff.crs;
-    const resolveEpsg = this.props.epsgResolver ?? defaultEpsgResolver;
-    const sourceProjection =
-      typeof crs === "number" ? await resolveEpsg(crs) : parseWkt(crs);
-    if (signal.aborted) {
-      return null;
-    }
-
-    // proj4's TypeScript definitions don't cover wkt-parser output, which it
-    // accepts at runtime.
-    // @ts-expect-error - incomplete proj4 typings
-    const converter4326 = proj4(sourceProjection, "EPSG:4326");
-    const projectTo4326 = (x: number, y: number) =>
-      converter4326.forward<Point>([x, y], false);
-    const projectFrom4326 = (x: number, y: number) =>
-      converter4326.inverse<Point>([x, y], false);
-
-    // @ts-expect-error - incomplete proj4 typings
-    const converter3857 = proj4(sourceProjection, "EPSG:3857");
-    const rawProjectTo3857 = (x: number, y: number) =>
-      converter3857.forward<Point>([x, y], false);
-    const projectFrom3857 = (x: number, y: number) =>
-      converter3857.inverse<Point>([x, y], false);
-
-    const units = sourceProjection.units;
-    if (!units) {
-      throw new Error(
-        "Source projection is missing a 'units' property, so metres per unit cannot be computed",
-      );
-    }
-    const mpu = metersPerUnit(units as Parameters<typeof metersPerUnit>[0], {
-      semiMajorAxis: sourceProjection.datum?.a ?? sourceProjection.a,
-    });
-
-    const descriptor = geoTiffToDescriptor(geotiff, {
-      projectTo4326,
-      projectFrom4326,
-      // `AffineTileset` stores this as-is, so wrapping here means every
-      // consumer (traversal, mesh) gets the pole-safe version — proj4 returns
-      // NaN at the poles, where Mercator is undefined.
-      projectTo3857: makeClampedForwardTo3857(rawProjectTo3857, projectTo4326),
-      projectFrom3857,
-      mpu,
-    });
-
-    // `transformBounds` densifies the edges, so a CRS whose boundary bows
-    // outward in lng/lat is fully enclosed. Reprojecting only the four corners
-    // would under-cover it.
-    const rawBounds = transformBounds(
-      projectTo4326,
-      ...descriptor.projectedBounds,
-    );
-    // Web Mercator cannot represent latitudes beyond ±85.051°, and tile
-    // selection converts these bounds through `lngLat → common space`.
-    const wgs84Bounds: Bounds = [
-      rawBounds[0],
-      Math.max(rawBounds[1], -MAX_WEB_MERCATOR_LAT),
-      rawBounds[2],
-      Math.min(rawBounds[3], MAX_WEB_MERCATOR_LAT),
-    ];
 
     const renderer = inferRenderPipeline(geotiff, gl);
     this.renderer = renderer;
