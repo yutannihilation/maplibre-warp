@@ -3,39 +3,29 @@
  * arguments.
  *
  * This is the whole of what deck.gl's `Viewport` gave the tile traversal:
- * frustum planes, zoom, geographic bounds, and an elevation scale.
+ * frustum planes, zoom, geographic bounds, and an elevation scale — in
+ * common space under mercator, on the unit sphere under globe.
  */
 
 import { Plane } from "@math.gl/culling";
 import type { CustomRenderMethodInput, Map as MapLibreMap } from "maplibre-gl";
 
+import { GLOBE_RADIUS, horizonPlane } from "./globe.js";
 import {
   COMMON_SPACE_SIZE,
   EARTH_CIRCUMFERENCE,
   MAX_WEB_MERCATOR_LAT,
 } from "./mercator.js";
+import { projectionFromVariant } from "./projection.js";
 import type { Bounds } from "./tileset/types.js";
-import type { RasterViewport } from "./tileset/viewport.js";
+import type {
+  GlobeRasterViewport,
+  MercatorRasterViewport,
+  RasterViewport,
+} from "./tileset/viewport.js";
 
 /** A 4×4 matrix in column-major order (`m[col * 4 + row]`), as WebGL wants. */
 export type Mat4 = Float64Array;
-
-/**
- * MapLibre's mercator shader variant name. Under any other variant (globe, or
- * the globe↔mercator transition) this package refuses to render; see
- * {@link isMercatorVariant}.
- */
-const MERCATOR_VARIANT = "mercator";
-
-/**
- * Whether MapLibre is currently rendering with the plain mercator projection.
- *
- * The shader variant name is MapLibre's own cache key for "which projection
- * shader code applies", so it is the right thing to gate on.
- */
-export function isMercatorVariant(variantName: string): boolean {
-  return variantName === MERCATOR_VARIANT;
-}
 
 /**
  * Compose `mainMatrix` (mercator `[0, 1]` + elevation in metres → clip space)
@@ -77,14 +67,21 @@ function commonSpaceToClip(
 }
 
 /**
- * Extract the six frustum planes from a combined view-projection matrix
- * (Gribb & Hartmann), in the matrix's *input* space.
+ * Extract frustum planes from a combined view-projection matrix (Gribb &
+ * Hartmann), in the matrix's *input* space.
  *
  * The returned planes have normals pointing **into** the frustum, normalised,
  * which is the orientation `@math.gl/culling` expects: a bounding volume
  * entirely on a plane's negative side is outside.
+ *
+ * @param options.sidesOnly  Return only left/right/bottom/top. The globe
+ *   shader overwrites clip `z` with its own horizon term, so the matrix's near
+ *   and far planes say nothing about what is drawn there.
  */
-export function extractFrustumPlanes(m: ArrayLike<number>): Plane[] {
+export function extractFrustumPlanes(
+  m: ArrayLike<number>,
+  options: { sidesOnly?: boolean } = {},
+): Plane[] {
   // Rows of the matrix. Column-major storage: row i is m[0*4+i], m[1*4+i], …
   const row = (i: number): [number, number, number, number] => [
     m[i]!,
@@ -113,9 +110,13 @@ export function extractFrustumPlanes(m: ArrayLike<number>): Plane[] {
     add(r3, r0, -1), // right
     add(r3, r1, 1), // bottom
     add(r3, r1, -1), // top
-    add(r3, r2, 1), // near
-    add(r3, r2, -1), // far
   ];
+  if (!options.sidesOnly) {
+    coefficients.push(
+      add(r3, r2, 1), // near
+      add(r3, r2, -1), // far
+    );
+  }
 
   const planes: Plane[] = [];
   for (const [a, b, c, d] of coefficients) {
@@ -169,7 +170,11 @@ export function drawingBufferRatio(gl: WebGL2RenderingContext): number {
 /**
  * Build a {@link RasterViewport} for this frame.
  *
- * @param map   The MapLibre map (for zoom and geographic bounds).
+ * Dispatches on the shader variant MapLibre is rendering with; callers must
+ * have checked {@link projectionFromVariant} first, since an unknown variant
+ * throws here rather than guessing a space for the frustum.
+ *
+ * @param map   The MapLibre map (for zoom, centre and geographic bounds).
  * @param args  MapLibre's `CustomRenderMethodInput`.
  * @param gl    The map's GL context, for the drawing-buffer ratio.
  */
@@ -178,14 +183,24 @@ export function createRasterViewport(
   args: CustomRenderMethodInput,
   gl: WebGL2RenderingContext,
 ): RasterViewport {
-  const center = map.getCenter();
-  const unitsPerMeter = unitsPerMeterAtLatitude(center.lat);
-  const clipMatrix = commonSpaceToClip(
-    args.defaultProjectionData.mainMatrix,
-    unitsPerMeter,
-  );
+  const projection = projectionFromVariant(args.shaderData.variantName);
+  switch (projection) {
+    case "mercator":
+      return createMercatorViewport(map, args, gl);
+    case "globe":
+      return createGlobeViewport(map, args, gl);
+    default:
+      throw new Error(
+        `Unsupported MapLibre shader variant "${args.shaderData.variantName}"`,
+      );
+  }
+}
 
-  const frustumPlanes = extractFrustumPlanes(clipMatrix);
+/** The pieces of the viewport that do not depend on the projection. */
+function commonViewportFields(
+  map: MapLibreMap,
+  gl: WebGL2RenderingContext,
+): Pick<RasterViewport, "zoom" | "center" | "getBounds" | "pixelRatio"> {
   const bounds = map.getBounds();
   const wgs84Bounds: Bounds = [
     bounds.getWest(),
@@ -193,12 +208,59 @@ export function createRasterViewport(
     bounds.getEast(),
     bounds.getNorth(),
   ];
-
+  const center = map.getCenter();
   return {
     zoom: map.getZoom(),
-    frustumPlanes,
+    center: [center.lng, center.lat],
     getBounds: () => wgs84Bounds,
-    unitsPerMeter,
     pixelRatio: drawingBufferRatio(gl),
+  };
+}
+
+function createMercatorViewport(
+  map: MapLibreMap,
+  args: CustomRenderMethodInput,
+  gl: WebGL2RenderingContext,
+): MercatorRasterViewport {
+  const common = commonViewportFields(map, gl);
+  const unitsPerMeter = unitsPerMeterAtLatitude(common.center[1]);
+  const clipMatrix = commonSpaceToClip(
+    args.defaultProjectionData.mainMatrix,
+    unitsPerMeter,
+  );
+
+  return {
+    ...common,
+    projection: "mercator",
+    frustumPlanes: extractFrustumPlanes(clipMatrix),
+    unitsPerMeter,
+  };
+}
+
+/**
+ * Under globe, `mainMatrix` takes a unit-sphere position to clip space, so
+ * its side planes are already in the space the sphere bounding volumes use.
+ * MapLibre's horizon plane joins them to cull the far side of the planet,
+ * which the matrix alone cannot see — and its normal, pointing at the camera,
+ * is what the LOD criterion measures obliqueness against.
+ */
+function createGlobeViewport(
+  map: MapLibreMap,
+  args: CustomRenderMethodInput,
+  gl: WebGL2RenderingContext,
+): GlobeRasterViewport {
+  const { mainMatrix, clippingPlane } = args.defaultProjectionData;
+  const horizon = horizonPlane(clippingPlane);
+  const { normal } = horizon;
+
+  return {
+    ...commonViewportFields(map, gl),
+    projection: "globe",
+    frustumPlanes: [
+      ...extractFrustumPlanes(mainMatrix, { sidesOnly: true }),
+      horizon,
+    ],
+    cameraDirection: [normal.x, normal.y, normal.z],
+    unitsPerMeter: 1 / GLOBE_RADIUS,
   };
 }

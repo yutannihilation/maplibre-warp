@@ -260,8 +260,13 @@ export class TileScheduler<PayloadT> {
   }
 
   /**
-   * Order tiles by the distance from their centre to the centre of the visible
-   * extent, both in common space.
+   * Order tiles by the distance from their centre to the map centre, both in
+   * common space.
+   *
+   * Deliberately the map centre rather than the middle of `getBounds()`: under
+   * globe MapLibre widens those bounds to the whole world as soon as a pole is
+   * on screen, which would put the ordering centre at lng 0 and fill the
+   * screen in from the wrong side.
    *
    * The traversal has just populated `boundingVolumeCache` for every tile it
    * visited, so the centres are free. A tile missing from the cache sorts last.
@@ -270,11 +275,7 @@ export class TileScheduler<PayloadT> {
     indices: TileIndex[],
     viewport: RasterViewport,
   ): TileIndex[] {
-    const [west, south, east, north] = viewport.getBounds();
-    const [centreX, centreY] = commonSpaceFromLngLat(
-      (west + east) / 2,
-      (south + north) / 2,
-    );
+    const [centreX, centreY] = commonSpaceFromLngLat(...viewport.center);
 
     const distance = (index: TileIndex): number => {
       const entry = this.boundingVolumeCache.get(index.z, index.x, index.y);

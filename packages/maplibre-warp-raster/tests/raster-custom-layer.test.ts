@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { mercatorFromLngLat } from "../src/mercator.js";
 import type {
   RasterCustomLayerProps,
   RasterSource,
 } from "../src/raster-custom-layer.js";
-import { RasterCustomLayer } from "../src/raster-custom-layer.js";
+import {
+  globeFrameUniforms,
+  mercatorFrameUniforms,
+  RasterCustomLayer,
+} from "../src/raster-custom-layer.js";
 import type { RasterTilesetDescriptor } from "../src/tileset/tileset-interface.js";
 import type { Point } from "../src/tileset/types.js";
 
@@ -35,6 +40,16 @@ function makeMap() {
 }
 
 const gl = {} as WebGL2RenderingContext;
+
+/** A column-major 4×4 identity matrix. */
+function identityMatrix(): Float64Array {
+  const m = new Float64Array(16);
+  m[0] = 1;
+  m[5] = 1;
+  m[10] = 1;
+  m[15] = 1;
+  return m;
+}
 
 class TestLayer extends RasterCustomLayer {
   attempts = 0;
@@ -185,5 +200,71 @@ describe("RasterCustomLayer source opening", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("per-frame uniforms", () => {
+  it("folds the map centre into the matrix under mercator", () => {
+    const map = {
+      getCenter: () => ({ lng: 8.5417, lat: 47.3769 }),
+    } as unknown as Parameters<typeof mercatorFrameUniforms>[0];
+    const args = {
+      defaultProjectionData: { mainMatrix: identityMatrix() },
+    } as unknown as Parameters<typeof mercatorFrameUniforms>[1];
+
+    const uniforms = mercatorFrameUniforms(map, args);
+    expect(Object.keys(uniforms).sort()).toEqual([
+      "u_origin_high",
+      "u_origin_low",
+      "u_projection_matrix",
+    ]);
+
+    // With an identity matrix the translated matrix's fourth column is the
+    // origin itself, and high + low reconstruct that same origin.
+    const origin = mercatorFromLngLat(8.5417, 47.3769);
+    const matrix = uniforms.u_projection_matrix as Float32Array;
+    expect(matrix[12]).toBeCloseTo(origin[0], 6);
+    expect(matrix[13]).toBeCloseTo(origin[1], 6);
+
+    const high = uniforms.u_origin_high as Float32Array;
+    const low = uniforms.u_origin_low as Float32Array;
+    expect(high[0]! + low[0]!).toBeCloseTo(origin[0], 15);
+    expect(high[1]! + low[1]!).toBeCloseTo(origin[1], 15);
+  });
+
+  it("passes MapLibre's globe uniforms through untouched", () => {
+    // Every uniform the globe vertex prelude declares must be set, and the
+    // fallback matrix must be the mercator one — feeding it `mainMatrix`
+    // would break the globe↔mercator transition blend.
+    const mainMatrix = identityMatrix();
+    const fallbackMatrix = identityMatrix();
+    fallbackMatrix[0] = 7;
+    const args = {
+      defaultProjectionData: {
+        mainMatrix,
+        fallbackMatrix,
+        tileMercatorCoords: [0, 0, 1, 1],
+        clippingPlane: [0, 0, 1, -0.3],
+        projectionTransition: 0.25,
+      },
+    } as unknown as Parameters<typeof globeFrameUniforms>[0];
+
+    const uniforms = globeFrameUniforms(args);
+    expect(Object.keys(uniforms).sort()).toEqual([
+      "u_projection_clipping_plane",
+      "u_projection_fallback_matrix",
+      "u_projection_matrix",
+      "u_projection_tile_mercator_coords",
+      "u_projection_transition",
+    ]);
+    expect(uniforms.u_projection_transition).toBe(0.25);
+    expect(uniforms.u_projection_clipping_plane).toEqual(
+      new Float32Array([0, 0, 1, -0.3]),
+    );
+    expect(uniforms.u_projection_tile_mercator_coords).toEqual(
+      new Float32Array([0, 0, 1, 1]),
+    );
+    expect((uniforms.u_projection_fallback_matrix as Float32Array)[0]).toBe(7);
+    expect((uniforms.u_projection_matrix as Float32Array)[0]).toBe(1);
   });
 });

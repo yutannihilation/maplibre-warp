@@ -68,7 +68,9 @@ function makeViewport(zoom: number): RasterViewport {
   ];
   const bounds: Bounds = [-180, -85, 180, 85];
   return {
+    projection: "mercator",
     zoom,
+    center: [0, 0],
     frustumPlanes,
     getBounds: () => bounds,
     unitsPerMeter: 1,

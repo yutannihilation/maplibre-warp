@@ -33,6 +33,7 @@
       #panel select {
         font: inherit;
         width: 100%;
+        margin-bottom: 8px;
       }
       #status {
         margin-top: 8px;
@@ -46,6 +47,12 @@
     <div id="panel">
       <label for="dataset">Dataset</label>
       <select id="dataset"></select>
+      <label for="projection">Projection</label>
+      <select id="projection">
+        <option value="mercator">mercator</option>
+        <option value="globe">globe (mercator above z12)</option>
+        <option value="vertical-perspective">vertical-perspective</option>
+      </select>
       <div id="status">loading…</div>
     </div>
     <script type="module" src="/src/main.ts"></script>

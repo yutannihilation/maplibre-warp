@@ -49,7 +49,8 @@ and the data reaches the GPU unquantised.
 `examples/cog-basic` is a Vite app with three datasets that exercise different
 paths: swisstopo PK1000 (EPSG:2056 oblique Mercator, RGB), NLCD land cover
 (Albers Equal Area, palette + nodata) and a Tennessee orthophoto (EPSG:2274
-State Plane in US survey feet, grayscale + nodata).
+State Plane in US survey feet, grayscale + nodata). A projection selector
+switches the map between mercator, globe and vertical-perspective.
 
 ```bash
 pnpm install
@@ -72,6 +73,30 @@ handful of triangles; areas where the projection curves get more.
 **Styling.** Shader modules are concatenated into one fragment shader —
 texture seed, nodata discard, mask discard, photometric conversion, colormap —
 and one program is compiled per distinct module chain.
+
+### Globe
+
+The layer follows whichever projection the map is rendering with, read every
+frame from `shaderData.variantName`. MapLibre has two shader variants,
+`mercator` and `globe`; the latter also covers the animated globe↔mercator
+transition. One program is compiled per variant, and the tile traversal
+switches spaces with it:
+
+- Under globe, tile bounding volumes are fitted on MapLibre's unit sphere
+  (using the same mercator → sphere formula as its vertex prelude) and culled
+  against the side planes of the globe matrix plus MapLibre's horizon plane,
+  which is what removes tiles on the far side of the planet. Tiles spanning
+  more than 30° are never culled — nine sample points cannot bound that much
+  sphere — and their children are tested instead.
+- The globe is drawn at the mercator scale of the map centre's latitude, so the
+  LOD criterion uses that latitude for every tile (a tile's own latitude, the
+  right choice under mercator, would leave lower-latitude tiles blurry), then
+  coarsens tiles seen obliquely towards the limb.
+- Under globe, `projectTile` maps its input through a non-linear sphere
+  conversion before any matrix, so the relative-to-centre precision scheme
+  below cannot apply: the shader hands it absolute float32 mercator positions,
+  exactly as MapLibre's own globe layers do. With the `globe` style projection
+  this only runs below z12, where MapLibre switches to flat mercator anyway.
 
 ### Precision
 
@@ -113,8 +138,11 @@ loading, never per frame.
 
 ## Current limitations
 
-- **Mercator only.** Under globe projection the layer skips rendering and warns
-  once. The shader is structured so globe is a later addition, not a rewrite.
+- **Globe precision at high zoom.** Under the `vertical-perspective` style
+  projection, which stays a globe at every zoom, positions are absolute
+  float32 mercator and jitter from around z14 — the same limit MapLibre's own
+  layers have there. The `globe` projection is unaffected: it renders flat
+  mercator above z12, where the relative-to-centre path takes over.
 - **8-bit unsigned samples only.** 16/32-bit and signed/float rasters throw an
   explicit error rather than rendering something wrong; they need the integer-
   sampler path. The texture-format table already covers them.

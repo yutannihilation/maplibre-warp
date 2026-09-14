@@ -1,4 +1,6 @@
 export { splitFloat64, splitFloat64Array } from "./fp64.js";
+export type { SpherePoint } from "./globe.js";
+export { GLOBE_RADIUS, horizonPlane, sphereFromMercator } from "./globe.js";
 export {
   COMMON_SPACE_SIZE,
   commonSpaceFromLngLat,
@@ -15,12 +17,19 @@ export {
 } from "./mercator.js";
 export type { TileMeshData } from "./mesh.js";
 export { buildTileMesh, DEFAULT_MAX_ERROR, GpuMesh } from "./mesh.js";
+export type { ViewportProjection } from "./projection.js";
+export { projectionFromVariant } from "./projection.js";
 export type {
   RasterCustomLayerProps,
   RasterSource,
   RasterTilePayload,
 } from "./raster-custom-layer.js";
-export { RasterCustomLayer, translateMatrix } from "./raster-custom-layer.js";
+export {
+  globeFrameUniforms,
+  mercatorFrameUniforms,
+  RasterCustomLayer,
+  translateMatrix,
+} from "./raster-custom-layer.js";
 export type {
   ModuleBindings,
   RasterModuleInstance,
@@ -63,13 +72,16 @@ export type {
   TileIndex,
   ZRange,
 } from "./tileset/types.js";
-export type { RasterViewport } from "./tileset/viewport.js";
+export type {
+  GlobeRasterViewport,
+  MercatorRasterViewport,
+  RasterViewport,
+} from "./tileset/viewport.js";
 export type { CornerLatitudes } from "./tileset/web-mercator-clamp.js";
 export { createInitialWebMercatorTriangulation } from "./tileset/web-mercator-clamp.js";
 export {
   createRasterViewport,
   drawingBufferRatio,
   extractFrustumPlanes,
-  isMercatorVariant,
   unitsPerMeterAtLatitude,
 } from "./viewport-shim.js";
