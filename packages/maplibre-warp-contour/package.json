@@ -1,0 +1,42 @@
+{
+  "name": "@yutannihilation/maplibre-warp-contour",
+  "version": "0.0.0",
+  "description": "Contour vector tiles generated in the browser from a Cloud-Optimized GeoTIFF, for MapLibre GL JS",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "default": "./dist/worker.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.build.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@developmentseed/geotiff": "0.8.0-beta.2",
+    "@yutannihilation/maplibre-warp-geotiff": "workspace:^",
+    "@yutannihilation/maplibre-warp-raster": "workspace:^",
+    "d3-contour": "4.0.2"
+  },
+  "peerDependencies": {
+    "maplibre-gl": "^6.7.0"
+  },
+  "devDependencies": {
+    "@mapbox/vector-tile": "3.0.0",
+    "@types/d3-contour": "3.0.6",
+    "maplibre-gl": "6.7.0",
+    "pbf": "5.1.2"
+  }
+}
