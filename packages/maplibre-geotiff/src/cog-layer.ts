@@ -133,6 +133,13 @@ export class COGLayer extends RasterCustomLayer {
     gl: WebGL2RenderingContext;
     signal: AbortSignal;
   }): Promise<RasterSource | null> {
+    // A retry re-runs this method, so release anything a previous attempt
+    // managed to allocate before it failed. `inferRenderPipeline` can have
+    // uploaded a colormap texture by then.
+    this.renderer?.destroy(gl);
+    this.renderer = undefined;
+    this.geotiff = undefined;
+
     const geotiff = await fetchGeoTIFF(this.props.geotiff, {
       concurrencyLimiter:
         this.props.concurrencyLimiter === undefined

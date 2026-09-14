@@ -20,6 +20,9 @@ import type { RasterTilesetDescriptor } from "./tileset/tileset-interface.js";
 import type { Bounds, TileIndex, ZRange } from "./tileset/types.js";
 import { createRasterViewport, isMercatorVariant } from "./viewport-shim.js";
 
+const DEFAULT_RETRY_BASE_DELAY = 1000;
+const DEFAULT_MAX_RETRIES = 3;
+
 /** Everything the layer needs to draw one loaded tile. */
 export interface RasterTilePayload {
   mesh: GpuMesh;
@@ -52,6 +55,22 @@ export interface RasterCustomLayerProps {
   maxCacheSize?: number;
   /** Elevation range in metres, or null for a flat raster. @default null */
   zRange?: ZRange | null;
+  /**
+   * Delay before the first retry of a failed load, in milliseconds. Each
+   * further failure doubles it.
+   *
+   * Applies both to opening the source and to individual tile loads, so a
+   * transient outage is described by one pair of knobs rather than two.
+   *
+   * @default 1000
+   */
+  retryBaseDelay?: number;
+  /**
+   * How many times to retry a failed load before giving up.
+   *
+   * @default 3
+   */
+  maxRetries?: number;
 }
 
 /**
@@ -107,6 +126,8 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
   opacity: number;
   private readonly maxCacheByteSize: number | undefined;
   private readonly maxCacheSize: number | undefined;
+  private readonly retryBaseDelay: number;
+  private readonly maxRetries: number;
   private readonly zRange: ZRange | null;
 
   constructor(props: RasterCustomLayerProps) {
@@ -114,6 +135,8 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     this.opacity = props.opacity ?? 1;
     this.maxCacheByteSize = props.maxCacheByteSize;
     this.maxCacheSize = props.maxCacheSize;
+    this.retryBaseDelay = props.retryBaseDelay ?? DEFAULT_RETRY_BASE_DELAY;
+    this.maxRetries = props.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.zRange = props.zRange ?? null;
   }
 
@@ -140,45 +163,92 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     const controller = new AbortController();
     this.sourceController = controller;
 
-    void this.createSource({ map, gl, signal: controller.signal })
-      .then((source) => {
-        if (!source || controller.signal.aborted) {
+    void this.openSource(map, gl, controller.signal);
+  }
+
+  /**
+   * Open the source, retrying on failure with the same backoff the tile loads
+   * use.
+   *
+   * Without this a single transient failure while reading the COG header left
+   * the layer permanently empty: nothing retried, and the only trace was one
+   * logged rejection. That is a worse outcome than a failed tile, because it
+   * takes out the whole layer rather than one tile's footprint.
+   */
+  private async openSource(
+    map: MapLibreMap,
+    gl: WebGL2RenderingContext,
+    signal: AbortSignal,
+  ): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      // Checked here, not only after `createSource`, because `sleep` resolves
+      // early when the signal aborts: without this the loop would start one
+      // more attempt on a layer that has already been removed.
+      if (signal.aborted) {
+        return;
+      }
+      try {
+        const source = await this.createSource({ map, gl, signal });
+        if (signal.aborted || !source) {
           return;
         }
-        this.scheduler = new TileScheduler<RasterTilePayload>({
-          descriptor: source.descriptor,
-          wgs84Bounds: source.wgs84Bounds,
-          zRange: this.zRange,
-          maxCacheByteSize: this.maxCacheByteSize,
-          maxCacheSize: this.maxCacheSize,
-          loadTile: (index, signal) => source.loadTile(index, { gl, signal }),
-          destroyTile: (payload) => payload.destroy(gl),
-          byteLengthOf: (payload) => payload.byteLength,
-          // Repaint when a tile arrives or a retry falls due, never per frame.
-          onNeedsRepaint: () => map.triggerRepaint(),
-          onTileError: (index, error, { attempt, willRetry }) => {
-            const tile = `tile ${index.z}/${index.x}/${index.y}`;
-            // A blip that is about to be retried is not a failure yet, so do
-            // not report it as one.
-            if (willRetry) {
-              console.warn(
-                `[${this.id}] ${tile} failed (attempt ${attempt}), retrying`,
-                error,
-              );
-            } else {
-              console.error(`[${this.id}] ${tile} failed, giving up`, error);
-            }
-          },
-        });
-        this.onSourceReady?.(source);
-        map.triggerRepaint();
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) {
+        this.attachSource(source, map, gl);
+        return;
+      } catch (error) {
+        if (signal.aborted) {
           return;
         }
-        console.error(`[${this.id}] failed to open raster source`, error);
-      });
+        if (attempt > this.maxRetries) {
+          console.error(
+            `[${this.id}] failed to open raster source, giving up`,
+            error,
+          );
+          return;
+        }
+        console.warn(
+          `[${this.id}] failed to open raster source (attempt ${attempt}), retrying`,
+          error,
+        );
+        await sleep(this.retryBaseDelay * 2 ** (attempt - 1), signal);
+      }
+    }
+  }
+
+  /** Wire a resolved source up to a scheduler and ask for the first paint. */
+  private attachSource(
+    source: RasterSource,
+    map: MapLibreMap,
+    gl: WebGL2RenderingContext,
+  ): void {
+    this.scheduler = new TileScheduler<RasterTilePayload>({
+      descriptor: source.descriptor,
+      wgs84Bounds: source.wgs84Bounds,
+      zRange: this.zRange,
+      maxCacheByteSize: this.maxCacheByteSize,
+      maxCacheSize: this.maxCacheSize,
+      retryBaseDelay: this.retryBaseDelay,
+      maxRetries: this.maxRetries,
+      loadTile: (index, signal) => source.loadTile(index, { gl, signal }),
+      destroyTile: (payload) => payload.destroy(gl),
+      byteLengthOf: (payload) => payload.byteLength,
+      // Repaint when a tile arrives or a retry falls due, never per frame.
+      onNeedsRepaint: () => map.triggerRepaint(),
+      onTileError: (index, error, { attempt, willRetry }) => {
+        const tile = `tile ${index.z}/${index.x}/${index.y}`;
+        // A blip that is about to be retried is not a failure yet, so do not
+        // report it as one.
+        if (willRetry) {
+          console.warn(
+            `[${this.id}] ${tile} failed (attempt ${attempt}), retrying`,
+            error,
+          );
+        } else {
+          console.error(`[${this.id}] ${tile} failed, giving up`, error);
+        }
+      },
+    });
+    this.onSourceReady?.(source);
+    map.triggerRepaint();
   }
 
   onRemove(_map: MapLibreMap, _gl: WebGL2RenderingContext): void {
@@ -271,6 +341,31 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     // stray binding would capture their `vertexAttribPointer` calls.
     gl.bindVertexArray(null);
   }
+}
+
+/**
+ * Wait `ms`, or resolve early if `signal` aborts.
+ *
+ * Resolving rather than rejecting on abort keeps the retry loop's control flow
+ * in one place: the caller re-checks `signal.aborted` and returns.
+ */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**
