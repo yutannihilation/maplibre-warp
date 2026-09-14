@@ -75,16 +75,35 @@ function showDataset(dataset: Dataset): void {
   map.addLayer(current, firstSymbolLayerId());
 }
 
-map.on("load", () => {
-  showDataset(DATASETS[0]!);
-});
+let styleReady = false;
 
-selectEl.addEventListener("change", () => {
+/**
+ * Show whichever dataset the `<select>` currently names.
+ *
+ * The select is the single source of truth. Both the initial load and later
+ * changes route through here, so a selection made before the style is ready is
+ * applied when `load` fires rather than being lost: the previous version
+ * re-showed `DATASETS[0]` on load unconditionally, which silently overrode any
+ * change that landed first and left the dropdown disagreeing with the map.
+ */
+function showSelectedDataset(): void {
+  if (!styleReady) {
+    // `addLayer` throws before the style is ready. The `load` handler below
+    // will apply whatever is selected by then.
+    return;
+  }
   const dataset = DATASETS.find((d) => d.id === selectEl.value);
   if (dataset) {
     showDataset(dataset);
   }
+}
+
+map.on("load", () => {
+  styleReady = true;
+  showSelectedDataset();
 });
+
+selectEl.addEventListener("change", showSelectedDataset);
 
 // Surface WebGL errors in the example rather than letting them scroll past.
 map.on("error", (event: { error: unknown }) => {
