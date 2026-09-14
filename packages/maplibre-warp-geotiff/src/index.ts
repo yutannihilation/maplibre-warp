@@ -13,7 +13,11 @@ export type {
   GeoTiffRenderer,
   GeoTiffTileTextures,
 } from "./render-pipeline.js";
-export { inferRenderPipeline } from "./render-pipeline.js";
+export {
+  inferRenderPipeline,
+  resolveContourBands,
+  validateContourOptions,
+} from "./render-pipeline.js";
 export type {
   CreateTextureOptions,
   GLTextureFormat,

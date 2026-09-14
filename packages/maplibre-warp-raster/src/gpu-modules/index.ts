@@ -225,6 +225,7 @@ uniform float u_colormap_reversed;`,
 export type {
   ContourLineProps,
   IsobandProps,
+  PackedThresholds,
   ValueSamplerKind,
   ValueTextureProps,
 } from "./contour.js";
@@ -233,6 +234,7 @@ export {
   ContourLine,
   Isoband,
   MAX_THRESHOLDS,
+  packThresholds,
   ValueTexture,
 } from "./contour.js";
 export type {

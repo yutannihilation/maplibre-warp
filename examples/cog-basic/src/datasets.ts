@@ -102,4 +102,21 @@ export const DATASETS: Dataset[] = [
       },
     },
   },
+  {
+    id: "s2-b04",
+    label: "Sentinel-2 B04 36QWD (EPSG:32636, uint16) → shader contours",
+    url: "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/36/Q/WD/2020/7/S2A_36QWD_20200701_0_L2A/B04.tif",
+    center: [33.5, 17.5],
+    zoom: 9,
+    note: "Red-band reflectance as isobands: exercises the uint16 (usampler2D) contour path.",
+    contour: {
+      thresholds: range(500, 5000, 500),
+      bands: {
+        colors: (t) =>
+          `rgb(${Math.round(40 + 200 * t)}, ${Math.round(30 + 60 * t)}, ${Math.round(80 - 60 * t)})`,
+        includeLower: true,
+      },
+      lines: false,
+    },
+  },
 ];

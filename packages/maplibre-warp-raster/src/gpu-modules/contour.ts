@@ -7,7 +7,7 @@
  */
 
 import type { RasterShaderModule, TextureBinding } from "../shader/module.js";
-import { colorToVec4, validateThresholds } from "./contour-bands.js";
+import { validateThresholds } from "./contour-bands.js";
 
 /** Size of the threshold uniform array, and so the most levels per layer. */
 export const MAX_THRESHOLDS = 64;
@@ -112,6 +112,31 @@ export const ValueTexture: Record<
   int: valueTextureModule("int"),
 };
 
+/** Thresholds packed for the `float u_thresholds[MAX_THRESHOLDS]` uniform. */
+export interface PackedThresholds {
+  /** Length `MAX_THRESHOLDS`, first `count` entries used. */
+  values: Float32Array;
+  count: number;
+}
+
+/**
+ * Validate and pack thresholds once per layer, so per-tile `getUniforms`
+ * calls hand the same array to the GPU without re-allocating.
+ */
+export function packThresholds(
+  thresholds: readonly number[],
+): PackedThresholds {
+  validateThresholds(thresholds);
+  if (thresholds.length > MAX_THRESHOLDS) {
+    throw new RangeError(
+      `${thresholds.length} thresholds exceed MAX_THRESHOLDS (${MAX_THRESHOLDS})`,
+    );
+  }
+  const values = new Float32Array(MAX_THRESHOLDS);
+  values.set(thresholds);
+  return { values, count: thresholds.length };
+}
+
 const THRESHOLD_DECLS = {
   key: "contour-thresholds",
   glsl: `#define MAX_THRESHOLDS ${MAX_THRESHOLDS}
@@ -119,23 +144,15 @@ uniform float u_thresholds[MAX_THRESHOLDS];
 uniform int u_threshold_count;`,
 };
 
-function thresholdUniforms(thresholds: readonly number[]): {
+function thresholdUniforms(packed: PackedThresholds): {
   u_thresholds: Float32Array;
   u_threshold_count: number;
 } {
-  validateThresholds(thresholds);
-  if (thresholds.length > MAX_THRESHOLDS) {
-    throw new RangeError(
-      `${thresholds.length} thresholds exceed MAX_THRESHOLDS (${MAX_THRESHOLDS})`,
-    );
-  }
-  const padded = new Float32Array(MAX_THRESHOLDS);
-  padded.set(thresholds);
-  return { u_thresholds: padded, u_threshold_count: thresholds.length };
+  return { u_thresholds: packed.values, u_threshold_count: packed.count };
 }
 
 export interface IsobandProps {
-  thresholds: readonly number[];
+  thresholds: PackedThresholds;
   includeLower: boolean;
   includeUpper: boolean;
   /** `n × 1` RGBA8 texture, one texel per emitted band, NEAREST. */
@@ -144,9 +161,12 @@ export interface IsobandProps {
 
 /**
  * Filled contour bands: classify `value` against the thresholds and look the
- * band's colour up. Open bands that are switched off become transparent
- * rather than discarded, so a following {@link ContourLine} can still draw
- * the boundary line over them.
+ * band's colour up. Invalid pixels and switched-off open bands become
+ * transparent rather than discarded: a following {@link ContourLine} can
+ * still draw the boundary line over an open band, and `discard` would leave
+ * `fwidth` undefined for the other fragments of the quad. For a layer that
+ * writes no depth, premultiplied transparent output is a no-op under
+ * MapLibre's `(ONE, ONE_MINUS_SRC_ALPHA)` blend, exactly like discard.
  */
 export const Isoband: RasterShaderModule<IsobandProps> = {
   name: "isoband",
@@ -155,9 +175,8 @@ export const Isoband: RasterShaderModule<IsobandProps> = {
 uniform int u_include_upper;
 uniform sampler2D u_band_colors;`,
   fsColor: `  if (valid == 0.0) {
-    discard;
-  }
-  {
+    color = vec4(0.0);
+  } else {
     int k = 0;
     for (int i = 0; i < MAX_THRESHOLDS; i++) {
       if (i >= u_threshold_count) {
@@ -186,17 +205,17 @@ uniform sampler2D u_band_colors;`,
 };
 
 export interface ContourLineProps {
-  thresholds: readonly number[];
+  thresholds: PackedThresholds;
   /** Line width in screen pixels. */
   width: number;
-  /** CSS colour (hex or rgb()/rgba()). */
-  color: string;
+  /** Straight-alpha RGBA in 0–1 (see `colorToVec4`), resolved once per layer. */
+  color: Float32Array;
   /** Every k-th threshold (by index) is a major line. Omit for none. */
   majorEvery?: number;
   /** @default 2 × width */
   majorWidth?: number;
   /** @default color */
-  majorColor?: string;
+  majorColor?: Float32Array;
 }
 
 /**
@@ -244,10 +263,10 @@ uniform vec4 u_major_color;`,
     uniforms: {
       ...thresholdUniforms(props.thresholds),
       u_line_width: props.width,
-      u_line_color: colorToVec4(props.color),
+      u_line_color: props.color,
       u_major_every: props.majorEvery ?? 0,
       u_major_width: props.majorWidth ?? 2 * props.width,
-      u_major_color: colorToVec4(props.majorColor ?? props.color),
+      u_major_color: props.majorColor ?? props.color,
     },
   }),
 };

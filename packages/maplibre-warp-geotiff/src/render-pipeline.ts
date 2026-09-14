@@ -16,6 +16,8 @@ import type { RenderPipeline } from "@yutannihilation/maplibre-warp-raster";
 import type {
   BandColors,
   ContourBand,
+  ContourLineProps,
+  IsobandProps,
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 import {
   BlackIsZero,
@@ -27,13 +29,14 @@ import {
   Colormap,
   ContourLine,
   CreateTexture,
+  colorToVec4,
   FilterNoDataVal,
   Isoband,
-  MAX_THRESHOLDS,
   MaskTexture,
+  packThresholds,
+  parseCssColor,
   resolveBandColors,
   ValueTexture,
-  validateThresholds,
   WhiteIsZero,
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 
@@ -90,15 +93,86 @@ export interface ContourRenderOptions {
   thresholds: readonly number[];
   /** Band to contour. @default 0 */
   band?: number;
-  /** Filled bands, or `false` for lines only. Required unless `lines` is set. */
+  /** Filled bands. Omit or pass `false` for lines only. */
   bands?: ContourBandOptions | false;
-  /** Contour lines, or `false` for bands only. @default { width: 1 } */
+  /**
+   * Contour lines, on by default; pass `false` for bands only. Disabling
+   * both is a configuration error.
+   * @default { width: 1 }
+   */
   lines?: ContourLineOptions | false;
 }
 
 /** A band of the contour model together with its colour. */
 export interface ContourBandWithColor extends ContourBand {
   color: string;
+}
+
+/** The band model with colours, or `[]` when bands are off. */
+export function resolveContourBands(
+  contour: ContourRenderOptions,
+): ContourBandWithColor[] {
+  if (!contour.bands) {
+    return [];
+  }
+  const model = bandsFromThresholds(contour.thresholds, contour.bands);
+  const colors = resolveBandColors(contour.bands.colors, model.length);
+  return model.map((band, k) => ({ ...band, color: colors[k]! }));
+}
+
+/**
+ * Reject every contour configuration error up front, so a bad option fails
+ * at construction instead of surfacing as a retried source-open failure
+ * after the COG header has been fetched.
+ *
+ * @param samplesPerPixel  When known (after the header is read), the band
+ *                         index is checked against it too.
+ */
+export function validateContourOptions(
+  contour: ContourRenderOptions,
+  samplesPerPixel?: number,
+): void {
+  packThresholds(contour.thresholds);
+  const band = contour.band ?? 0;
+  if (!Number.isInteger(band) || band < 0) {
+    throw new RangeError(`band must be a non-negative integer, got ${band}`);
+  }
+  if (samplesPerPixel !== undefined && band >= samplesPerPixel) {
+    throw new RangeError(
+      `band ${band} is out of range for a ${samplesPerPixel}-band raster`,
+    );
+  }
+  if (contour.bands === false && contour.lines === false) {
+    throw new RangeError("contour needs bands, lines or both");
+  }
+  if (contour.bands) {
+    const bands = resolveContourBands(contour);
+    if (bands.length === 0) {
+      throw new RangeError(
+        "the thresholds and includeLower/includeUpper settings emit no band",
+      );
+    }
+    for (const { color } of bands) {
+      parseCssColor(color);
+    }
+  }
+  if (contour.lines) {
+    const { width, majorWidth, color, majorColor } = contour.lines;
+    for (const [name, w] of [
+      ["width", width],
+      ["majorWidth", majorWidth],
+    ] as const) {
+      if (w !== undefined && !(Number.isFinite(w) && w >= 0)) {
+        throw new RangeError(`lines.${name} must be a non-negative number`);
+      }
+    }
+    if (color !== undefined) {
+      parseCssColor(color);
+    }
+    if (majorColor !== undefined) {
+      parseCssColor(majorColor);
+    }
+  }
 }
 
 export interface GeoTiffRenderer {
@@ -378,21 +452,8 @@ function createContourRenderer(
 ): GeoTiffRenderer {
   const { bitsPerSample, sampleFormat, samplesPerPixel, nodata } =
     geotiff.cachedTags;
-  validateThresholds(contour.thresholds);
-  if (contour.thresholds.length > MAX_THRESHOLDS) {
-    throw new RangeError(
-      `${contour.thresholds.length} thresholds exceed the limit of ${MAX_THRESHOLDS}`,
-    );
-  }
+  validateContourOptions(contour, samplesPerPixel);
   const band = contour.band ?? 0;
-  if (!Number.isInteger(band) || band < 0 || band >= samplesPerPixel) {
-    throw new RangeError(
-      `band ${band} is out of range for a ${samplesPerPixel}-band raster`,
-    );
-  }
-  if (contour.bands === false && contour.lines === false) {
-    throw new RangeError("contour needs bands, lines or both");
-  }
 
   const uploadedSamples = samplesPerPixel === 3 ? 4 : samplesPerPixel;
   const textureFormat = inferTextureFormat(
@@ -414,19 +475,15 @@ function createContourRenderer(
   const offset = geotiff.offsets[band] ?? 0;
   const nodataSampled = nodata === null ? null : nodata / denorm;
 
-  let bands: ContourBandWithColor[] = [];
+  // Everything a tile's props need is resolved once here: `buildPipeline`
+  // runs per tile and `getUniforms` per tile per frame, so no colour parsing
+  // or array allocation may live there.
+  const thresholds = packThresholds(contour.thresholds);
+  const bands = resolveContourBands(contour);
   let bandColorTexture: WebGLTexture | undefined;
-  const bandOptions = contour.bands === false ? null : contour.bands;
-  const includeLower = bandOptions?.includeLower ?? false;
-  const includeUpper = bandOptions?.includeUpper ?? true;
-  if (bandOptions) {
-    const model = bandsFromThresholds(contour.thresholds, {
-      includeLower,
-      includeUpper,
-    });
-    const colors = resolveBandColors(bandOptions.colors, model.length);
-    bands = model.map((b, k) => ({ ...b, color: colors[k]! }));
-    const image = bandColorImage(colors);
+  let isobandProps: IsobandProps | undefined;
+  if (contour.bands) {
+    const image = bandColorImage(bands.map((b) => b.color));
     bandColorTexture = createTexture2D(gl, {
       width: image.width,
       height: image.height,
@@ -434,8 +491,26 @@ function createContourRenderer(
       format: inferTextureFormat(gl, 4, [8, 8, 8, 8], [SampleFormat.Uint]),
       linear: false,
     });
+    isobandProps = {
+      thresholds,
+      includeLower: contour.bands.includeLower ?? false,
+      includeUpper: contour.bands.includeUpper ?? true,
+      colors: { texture: bandColorTexture, target: gl.TEXTURE_2D },
+    };
   }
-  const lineOptions = contour.lines === false ? null : (contour.lines ?? {});
+  let lineProps: ContourLineProps | undefined;
+  if (contour.lines !== false) {
+    const lines = contour.lines ?? {};
+    const width = lines.width ?? 1;
+    lineProps = {
+      thresholds,
+      width,
+      color: colorToVec4(lines.color ?? "#333333"),
+      majorEvery: lines.majorEvery,
+      majorWidth: lines.majorWidth ?? 2 * width,
+      majorColor: colorToVec4(lines.majorColor ?? lines.color ?? "#333333"),
+    };
+  }
 
   const buildPipeline = (textures: GeoTiffTileTextures): RenderPipeline => {
     const pipeline: RenderPipeline = [
@@ -458,31 +533,13 @@ function createContourRenderer(
         props: { mask: { texture: textures.mask, target: gl.TEXTURE_2D } },
       });
     }
-    if (bandColorTexture) {
-      pipeline.push({
-        module: Isoband,
-        props: {
-          thresholds: contour.thresholds,
-          includeLower,
-          includeUpper,
-          colors: { texture: bandColorTexture, target: gl.TEXTURE_2D },
-        },
-      });
+    if (isobandProps) {
+      pipeline.push({ module: Isoband, props: isobandProps });
     } else {
       pipeline.push({ module: ClearColor });
     }
-    if (lineOptions) {
-      pipeline.push({
-        module: ContourLine,
-        props: {
-          thresholds: contour.thresholds,
-          width: lineOptions.width ?? 1,
-          color: lineOptions.color ?? "#333333",
-          majorEvery: lineOptions.majorEvery,
-          majorWidth: lineOptions.majorWidth,
-          majorColor: lineOptions.majorColor,
-        },
-      });
+    if (lineProps) {
+      pipeline.push({ module: ContourLine, props: lineProps });
     }
     return pipeline;
   };

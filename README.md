@@ -46,12 +46,12 @@ and the data reaches the GPU unquantised.
 | `@yutannihilation/maplibre-warp-raster` | Renderer core: the custom-layer base class, tile scheduler, warp mesh, shader assembly and program cache. Source-format agnostic. |
 | `@yutannihilation/maplibre-warp-geotiff` | COG specifics: opening the file, building the tile pyramid, inferring a render pipeline from TIFF tags, texture formats. |
 
-`examples/cog-basic` is a Vite app with five datasets that exercise different
+`examples/cog-basic` is a Vite app with six datasets that exercise different
 paths: swisstopo PK1000 (EPSG:2056 oblique Mercator, RGB), NLCD land cover
 (Albers Equal Area, palette + nodata), a Tennessee orthophoto (EPSG:2274
-State Plane in US survey feet, grayscale + nodata), and two float32 DEMs
-(swissALTI3D in EPSG:2056, USGS 3DEP in EPSG:4326) drawn as shader contours
-with a legend. A projection selector switches the map between mercator, globe
+State Plane in US survey feet, grayscale + nodata), two float32 DEMs
+(swissALTI3D in EPSG:2056, USGS 3DEP in EPSG:4326) and a uint16 Sentinel-2
+band (EPSG:32636), the last three drawn as shader contours with a legend. A projection selector switches the map between mercator, globe
 and vertical-perspective.
 
 ```bash
@@ -118,8 +118,10 @@ cannot be LINEAR-filtered, and this also keeps nodata exact. Bands classify
 the value against up to 64 thresholds and look their colour up in a small
 texture; lines measure the distance to the nearest threshold in screen
 pixels via `fwidth`, so they keep a constant width at every zoom and under
-globe. Colours are hex or `rgb()`/`rgba()` strings. Output is raster: no
-labels and no picking. See `docs/adr/0003-shader-contours.md`.
+globe. Colours are hex or `rgb()`/`rgba()` strings, and every contour option
+is validated in the `COGLayer` constructor so a misconfiguration fails before
+any network request. Output is raster: no labels and no picking. See
+`docs/adr/0003-shader-contours.md`.
 
 ### Globe
 

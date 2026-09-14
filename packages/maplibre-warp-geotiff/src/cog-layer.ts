@@ -33,11 +33,6 @@ import {
   mercatorFromEPSG3857,
   RasterCustomLayer,
 } from "@yutannihilation/maplibre-warp-raster";
-import {
-  bandsFromThresholds,
-  resolveBandColors,
-  validateThresholds,
-} from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 import type { Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
 import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
@@ -47,7 +42,11 @@ import type {
   ContourRenderOptions,
   GeoTiffRenderer,
 } from "./render-pipeline.js";
-import { inferRenderPipeline } from "./render-pipeline.js";
+import {
+  inferRenderPipeline,
+  resolveContourBands,
+  validateContourOptions,
+} from "./render-pipeline.js";
 
 /**
  * Default per-origin request cap. Six matches the browser's HTTP/1.1
@@ -126,7 +125,8 @@ export class COGLayer extends RasterCustomLayer {
   constructor(props: COGLayerProps) {
     super(props);
     if (props.contour) {
-      validateThresholds(props.contour.thresholds);
+      // Fail here rather than inside the retried source-open path.
+      validateContourOptions(props.contour);
     }
     this.props = props;
   }
@@ -142,13 +142,7 @@ export class COGLayer extends RasterCustomLayer {
    * `contour.bands`.
    */
   getBands(): ContourBandWithColor[] {
-    const contour = this.props.contour;
-    if (!contour || contour.bands === false || !contour.bands) {
-      return [];
-    }
-    const model = bandsFromThresholds(contour.thresholds, contour.bands);
-    const colors = resolveBandColors(contour.bands.colors, model.length);
-    return model.map((band, k) => ({ ...band, color: colors[k]! }));
+    return this.props.contour ? resolveContourBands(this.props.contour) : [];
   }
 
   override onRemove(map: MapLibreMap, gl: WebGL2RenderingContext): void {
