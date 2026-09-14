@@ -5,8 +5,12 @@
 //   1. The deck.gl `Viewport` dependency is replaced by {@link RasterViewport}
 //      (see `viewport.ts`). Frustum planes arrive pre-extracted in common space
 //      instead of being read off `viewport.getFrustumPlanes()`.
-//   2. The globe branch is removed: `_getGlobeBoundingVolume`, `REF_POINTS_11`
-//      and the `project` traversal parameter are gone. Mercator only.
+//   2. The globe branch is rewritten: instead of a `project` callback and
+//      `REF_POINTS_11`, `computeBoundingVolume` maps the same reference points
+//      onto MapLibre's unit sphere (`globe.ts`) when the viewport says the
+//      frame is rendered under globe, and tiles spanning a large arc opt out of
+//      culling instead of being sampled more densely. See
+//      {@link RasterTileNode.computeBoundingVolume}.
 //   3. World-copy passes are removed. The layer draws the primary world only;
 //      see the README's limitations section.
 //   4. Pole clamping is the descriptor's responsibility (see
@@ -17,18 +21,22 @@
 //      MapLibre's 512-pixel-tile zoom convention. See {@link getMetersPerPixel}.
 
 import { transformBounds } from "@developmentseed/proj";
-import type { OrientedBoundingBox } from "@math.gl/culling";
 import {
   CullingVolume,
   makeOrientedBoundingBoxFromPoints,
 } from "@math.gl/culling";
 
+import type { SpherePoint } from "../globe.js";
+import { sphereFromMercator } from "../globe.js";
 import {
   commonSpaceFromLngLat,
   EARTH_CIRCUMFERENCE,
   lngLatFromCommonSpace,
+  mercatorFromEPSG3857,
   rescaleEPSG3857ToCommonSpace,
 } from "../mercator.js";
+import type { ViewportProjection } from "../projection.js";
+import type { BoundingVolumeCacheEntry } from "./bounding-volume-cache.js";
 import { BoundingVolumeCache } from "./bounding-volume-cache.js";
 import type {
   RasterTilesetDescriptor,
@@ -71,6 +79,24 @@ const REF_POINTS_9 = REF_POINTS_5.concat([
   [1, 0.5], // right edge
   [0.5, 1], // bottom edge
 ]);
+
+/**
+ * Under globe, a tile spanning more than this many degrees of longitude or
+ * latitude gets no bounding volume and is never frustum-culled.
+ *
+ * Nine points on a sphere bound a small patch well, but a hemisphere-sized
+ * tile's samples can all lie on one great circle and collapse to a slab that
+ * misses the visible surface entirely. Such tiles are few and coarse — the
+ * top of a global pyramid — and their children are small enough to cull, so
+ * always visiting them costs almost nothing.
+ */
+const GLOBE_MAX_CULLABLE_SPAN_DEGREES = 30;
+
+/**
+ * Below this, the foreshortening factor for globe LOD is clamped: a tile seen
+ * exactly edge-on at the limb would otherwise ask for infinitely coarse data.
+ */
+const GLOBE_MIN_FORESHORTENING = 0.05;
 
 /**
  * Raster Tile Node — represents a single tile in a tileset pyramid.
@@ -226,21 +252,26 @@ export class RasterTileNode {
     this.childVisible = false;
     this.selected = false;
 
-    const { boundingVolume, commonSpaceBounds } = this.getBoundingVolume(
-      elevationBounds,
-      boundingVolumeCache,
-    );
+    const { boundingVolume, commonSpaceBounds, sphereCenter } =
+      this.getBoundingVolume(
+        elevationBounds,
+        viewport.projection,
+        boundingVolumeCache,
+      );
 
     // Step 1: Bounds checking
     if (bounds && !this.insideBounds(bounds, commonSpaceBounds)) {
       return false;
     }
 
-    // Step 2: Frustum culling.
+    // Step 2: Frustum culling. A `null` volume is a tile too large to bound
+    // (globe only); it is treated as visible and its children decide.
     // Returns: <0 if outside, 0 if intersecting, >0 if fully inside
-    const isInside = cullingVolume.computeVisibility(boundingVolume);
-    if (isInside < 0) {
-      return false;
+    if (boundingVolume !== null) {
+      const isInside = cullingVolume.computeVisibility(boundingVolume);
+      if (isInside < 0) {
+        return false;
+      }
     }
 
     const children = this.children;
@@ -248,9 +279,10 @@ export class RasterTileNode {
     // Step 3: LOD selection. Only select this tile if no child is visible,
     // which prevents overlapping tiles.
     if (!this.childVisible && this.z >= minZ) {
-      const metersPerCSSPixel = getMetersPerPixelAtCommonSpaceBounds(
+      const metersPerCSSPixel = getMetersPerCSSPixelForTile(
+        viewport,
         commonSpaceBounds,
-        viewport.zoom,
+        sphereCenter,
       );
 
       const tileMetersPerPixel = this.level.metersPerPixel;
@@ -328,43 +360,55 @@ export class RasterTileNode {
   }
 
   /**
-   * The 3D bounding volume for this tile in common space, used for frustum
-   * culling.
+   * The 3D bounding volume for this tile in the viewport's space, used for
+   * frustum culling.
    *
    * Memoized in `boundingVolumeCache` (keyed by `z/x/y`): a tile's bounding
-   * volume depends only on `(z, x, y, zRange)` for a given descriptor, so on a
-   * cache hit it is returned without rerunning {@link computeBoundingVolume}'s
-   * proj4 reprojections + oriented-bounding-box fit.
+   * volume depends only on `(z, x, y, zRange, projection)` for a given
+   * descriptor, so on a cache hit it is returned without rerunning
+   * {@link computeBoundingVolume}'s proj4 reprojections + oriented-bounding-box
+   * fit. A hit computed for another `zRange` or projection is a miss.
    */
   getBoundingVolume(
     zRange: ZRange,
+    projection: ViewportProjection,
     boundingVolumeCache: BoundingVolumeCache,
-  ): { boundingVolume: OrientedBoundingBox; commonSpaceBounds: Bounds } {
+  ): BoundingVolumeCacheEntry {
     const cacheHit = boundingVolumeCache.get(this.z, this.x, this.y);
     if (
       cacheHit &&
+      cacheHit.projection === projection &&
       cacheHit.zRange[0] === zRange[0] &&
       cacheHit.zRange[1] === zRange[1]
     ) {
       return cacheHit;
     }
-    const computed = this.computeBoundingVolume(zRange);
-    boundingVolumeCache.set(this.z, this.x, this.y, { zRange, ...computed });
+    const computed = this.computeBoundingVolume(zRange, projection);
+    boundingVolumeCache.set(this.z, this.x, this.y, computed);
     return computed;
   }
 
   /**
    * Compute (without caching) the bounding volume for this tile: sample
    * reference points across the tile in its source CRS, reproject them to
-   * EPSG:3857, rescale to common space, and fit an oriented bounding box.
+   * EPSG:3857, and fit an oriented bounding box in the viewport's space.
+   *
+   * - Mercator: the points are rescaled to common space and `zRange` becomes
+   *   a Z extent.
+   * - Globe: the points go onto MapLibre's unit sphere the way the globe
+   *   vertex prelude maps them, and `zRange` scales them radially. The sphere
+   *   bulges outward between the samples, so the outer set is additionally
+   *   inflated by `1 / cos(half the sample spacing)` to keep the surface
+   *   inside the box. Tiles wider than {@link GLOBE_MAX_CULLABLE_SPAN_DEGREES}
+   *   get no volume at all; see that constant.
    *
    * TODO: fast path when the source tiling is already EPSG:3857 (four corners
    * suffice, and the box is axis aligned).
    */
-  private computeBoundingVolume(zRange: ZRange): {
-    boundingVolume: OrientedBoundingBox;
-    commonSpaceBounds: Bounds;
-  } {
+  private computeBoundingVolume(
+    zRange: ZRange,
+    projection: ViewportProjection,
+  ): BoundingVolumeCacheEntry {
     const [minZ, maxZ] = zRange;
 
     const tileCorners = this.level.projectedTileCorners(this.x, this.y);
@@ -378,16 +422,6 @@ export class RasterTileNode {
     const commonSpacePositions = refPointsEPSG3857.map((xy) =>
       rescaleEPSG3857ToCommonSpace(xy),
     );
-
-    const refPointPositions: [number, number, number][] = [];
-    for (const p of commonSpacePositions) {
-      refPointPositions.push([p[0], p[1], minZ]);
-
-      if (minZ !== maxZ) {
-        // Also sample at maximum elevation to capture the full 3D volume
-        refPointPositions.push([p[0], p[1], maxZ]);
-      }
-    }
 
     // [minX, minY, maxX, maxY] in common space for the quick bounds check.
     // TODO: this doesn't densify edges
@@ -412,11 +446,87 @@ export class RasterTileNode {
     }
 
     const commonSpaceBounds: Bounds = [minX, minY, maxX, maxY];
+
+    if (projection === "globe") {
+      return {
+        zRange,
+        projection,
+        commonSpaceBounds,
+        ...computeGlobeBoundingVolume(
+          refPointsEPSG3857,
+          commonSpaceBounds,
+          zRange,
+        ),
+      };
+    }
+
+    const refPointPositions: [number, number, number][] = [];
+    for (const p of commonSpacePositions) {
+      refPointPositions.push([p[0], p[1], minZ]);
+
+      if (minZ !== maxZ) {
+        // Also sample at maximum elevation to capture the full 3D volume
+        refPointPositions.push([p[0], p[1], maxZ]);
+      }
+    }
+
     return {
+      zRange,
+      projection,
       boundingVolume: makeOrientedBoundingBoxFromPoints(refPointPositions),
       commonSpaceBounds,
     };
   }
+}
+
+/**
+ * The globe half of {@link RasterTileNode.computeBoundingVolume}.
+ *
+ * `refPointsEPSG3857` follows the `REF_POINTS_9` order, so its first entry is
+ * the tile centre. `zRange` is already in sphere radii. A tile too large to
+ * bound gets neither a volume nor a centre; see the early return below.
+ */
+function computeGlobeBoundingVolume(
+  refPointsEPSG3857: Point[],
+  commonSpaceBounds: Bounds,
+  [minZ, maxZ]: ZRange,
+): Pick<BoundingVolumeCacheEntry, "boundingVolume" | "sphereCenter"> {
+  const spherePositions = refPointsEPSG3857.map((xy) =>
+    sphereFromMercator(mercatorFromEPSG3857(xy)),
+  );
+  const sphereCenter = spherePositions[0]!;
+
+  const [minX, minY, maxX, maxY] = commonSpaceBounds;
+  const [west, south] = lngLatFromCommonSpace([minX, minY]);
+  const [east, north] = lngLatFromCommonSpace([maxX, maxY]);
+  const spanDegrees = Math.max(east - west, north - south);
+  if (spanDegrees > GLOBE_MAX_CULLABLE_SPAN_DEGREES) {
+    // No `sphereCenter` either: a tile this large is seen at every angle at
+    // once, so one surface normal cannot describe how obliquely it is viewed.
+    // Reporting the centre anyway would let the LOD criterion coarsen the
+    // whole tile whenever that one point happens to face away from the
+    // camera, which is how such a tile ends up selected at root resolution
+    // instead of being subdivided.
+    return { boundingVolume: null };
+  }
+
+  // Nine points form a 3×3 grid, so samples are half the span apart and the
+  // surface between two of them rises `1 / cos(spacing / 2)` above their chord.
+  const halfSpacingRadians = ((spanDegrees / 2) * Math.PI) / 180 / 2;
+  const bulge = 1 / Math.cos(halfSpacingRadians);
+  const innerRadius = 1 + minZ;
+  const outerRadius = (1 + maxZ) * bulge;
+
+  const refPointPositions: [number, number, number][] = [];
+  for (const [x, y, z] of spherePositions) {
+    refPointPositions.push([x * innerRadius, y * innerRadius, z * innerRadius]);
+    refPointPositions.push([x * outerRadius, y * outerRadius, z * outerRadius]);
+  }
+
+  return {
+    boundingVolume: makeOrientedBoundingBoxFromPoints(refPointPositions),
+    sphereCenter,
+  };
 }
 
 /**
@@ -615,13 +725,43 @@ function getMetersPerPixel(latitude: number, zoom: number): number {
   );
 }
 
-function getMetersPerPixelAtCommonSpaceBounds(
+/**
+ * Metres of ground per CSS pixel where this tile is drawn.
+ *
+ * - Mercator: the tile's own centre latitude, since mercator stretches the
+ *   ground by `1 / cos(lat)`.
+ * - Globe: MapLibre sizes the sphere so its scale everywhere equals the
+ *   mercator scale at the *map centre's* latitude, so that latitude applies
+ *   to every tile. A tile seen obliquely towards the limb covers fewer screen
+ *   pixels per metre still, by roughly the cosine of the angle between its
+ *   surface normal and the camera direction, so the scale is divided by that.
+ */
+function getMetersPerCSSPixelForTile(
+  viewport: RasterViewport,
   commonSpaceBounds: Bounds,
-  zoom: number,
+  sphereCenter: SpherePoint | undefined,
 ): number {
+  if (viewport.projection === "globe") {
+    const atCenter = getMetersPerPixel(viewport.center[1], viewport.zoom);
+    if (!sphereCenter) {
+      // A tile with no bounding volume (too large to bound on the sphere) has
+      // no single normal to foreshorten by, so it is judged at face value and
+      // subdivides like any other.
+      return atCenter;
+    }
+    const camera = viewport.cameraDirection;
+    const foreshortening = Math.max(
+      sphereCenter[0] * camera[0] +
+        sphereCenter[1] * camera[1] +
+        sphereCenter[2] * camera[2],
+      GLOBE_MIN_FORESHORTENING,
+    );
+    return atCenter / foreshortening;
+  }
+
   const [minX, minY, maxX, maxY] = commonSpaceBounds;
   const [, lat] = lngLatFromCommonSpace([(minX + maxX) / 2, (minY + maxY) / 2]);
-  return getMetersPerPixel(lat, zoom);
+  return getMetersPerPixel(lat, viewport.zoom);
 }
 
 /**

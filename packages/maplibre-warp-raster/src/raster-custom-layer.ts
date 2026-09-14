@@ -11,14 +11,15 @@ import type {
 import { splitFloat64 } from "./fp64.js";
 import { mercatorFromLngLat } from "./mercator.js";
 import type { GpuMesh } from "./mesh.js";
-import type { RenderPipeline } from "./shader/module.js";
+import { projectionFromVariant } from "./projection.js";
+import type { RenderPipeline, UniformValue } from "./shader/module.js";
 import { collectBindings } from "./shader/module.js";
 import { ProgramCache } from "./shader/program.js";
 import type { DrawableTile } from "./tile-scheduler.js";
 import { TileScheduler } from "./tile-scheduler.js";
 import type { RasterTilesetDescriptor } from "./tileset/tileset-interface.js";
 import type { Bounds, TileIndex, ZRange } from "./tileset/types.js";
-import { createRasterViewport, isMercatorVariant } from "./viewport-shim.js";
+import { createRasterViewport } from "./viewport-shim.js";
 
 const DEFAULT_RETRY_BASE_DELAY = 1000;
 const DEFAULT_MAX_RETRIES = 3;
@@ -82,6 +83,16 @@ export interface RasterCustomLayerProps {
  * `renderingMode` is `"2d"`: MapLibre then gives the layer read-only depth,
  * which is what a flat raster wants.
  *
+ * ## Projections
+ *
+ * The layer follows whichever projection the map is rendering with, read each
+ * frame from `shaderData.variantName`: `"mercator"` and `"globe"` (which also
+ * covers the animated globe↔mercator transition) are supported; anything else
+ * warns once and draws nothing. Tile culling, LOD and the vertex shader all
+ * dispatch on it — see `viewport-shim.ts` and `shader/sources.ts`. The
+ * relative-to-centre precision scheme is mercator-only; under globe positions
+ * are absolute float32 mercator, as they are for MapLibre's own layers.
+ *
  * ## GL state
  *
  * {@link render} deliberately does **not** save and restore GL state, because
@@ -121,7 +132,7 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
   private programs?: ProgramCache;
   private scheduler?: TileScheduler<RasterTilePayload>;
   private sourceController?: AbortController;
-  private warnedNonMercator = false;
+  private warnedUnsupportedProjection = false;
 
   opacity: number;
   private readonly maxCacheByteSize: number | undefined;
@@ -267,12 +278,13 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
       return;
     }
 
-    if (!isMercatorVariant(args.shaderData.variantName)) {
-      if (!this.warnedNonMercator) {
-        this.warnedNonMercator = true;
+    const projection = projectionFromVariant(args.shaderData.variantName);
+    if (!projection) {
+      if (!this.warnedUnsupportedProjection) {
+        this.warnedUnsupportedProjection = true;
         console.warn(
-          `[${this.id}] only the mercator projection is supported; ` +
-            `skipping rendering under "${args.shaderData.variantName}".`,
+          `[${this.id}] unsupported MapLibre shader variant ` +
+            `"${args.shaderData.variantName}"; skipping rendering.`,
         );
       }
       return;
@@ -284,32 +296,20 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
       return;
     }
 
-    const centre = map.getCenter();
-    const origin = mercatorFromLngLat(centre.lng, centre.lat);
-    const [originXHigh, originXLow] = splitFloat64(origin[0]);
-    const [originYHigh, originYLow] = splitFloat64(origin[1]);
-    const projectionMatrix = translateMatrix(
-      args.defaultProjectionData.mainMatrix,
-      origin[0],
-      origin[1],
-    );
+    const frameUniforms =
+      projection === "globe"
+        ? globeFrameUniforms(args)
+        : mercatorFrameUniforms(map, args);
+    frameUniforms.u_opacity = this.opacity;
 
-    this.drawTiles(gl, args, drawList, {
-      projectionMatrix,
-      originHigh: new Float32Array([originXHigh, originYHigh]),
-      originLow: new Float32Array([originXLow, originYLow]),
-    });
+    this.drawTiles(gl, args, drawList, frameUniforms);
   }
 
   private drawTiles(
     gl: WebGL2RenderingContext,
     args: CustomRenderMethodInput,
     drawList: DrawableTile<RasterTilePayload>[],
-    frame: {
-      projectionMatrix: Float32Array;
-      originHigh: Float32Array;
-      originLow: Float32Array;
-    },
+    frameUniforms: Record<string, UniformValue>,
   ): void {
     const programs = this.programs!;
     let currentProgram: WebGLProgram | null = null;
@@ -320,10 +320,9 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
       if (program.program !== currentProgram) {
         gl.useProgram(program.program);
         currentProgram = program.program;
-        program.setUniform("u_projection_matrix", frame.projectionMatrix);
-        program.setUniform("u_origin_high", frame.originHigh);
-        program.setUniform("u_origin_low", frame.originLow);
-        program.setUniform("u_opacity", this.opacity);
+        for (const [name, value] of Object.entries(frameUniforms)) {
+          program.setUniform(name, value);
+        }
       }
 
       program.bind(collectBindings(payload.pipeline));
@@ -341,6 +340,57 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     // stray binding would capture their `vertexAttribPointer` calls.
     gl.bindVertexArray(null);
   }
+}
+
+/**
+ * Per-frame uniforms for the mercator vertex shader: the relative-to-centre
+ * scheme described in `shader/sources.ts`.
+ *
+ * Exported for unit testing.
+ */
+export function mercatorFrameUniforms(
+  map: MapLibreMap,
+  args: CustomRenderMethodInput,
+): Record<string, UniformValue> {
+  const centre = map.getCenter();
+  const origin = mercatorFromLngLat(centre.lng, centre.lat);
+  const [originXHigh, originXLow] = splitFloat64(origin[0]);
+  const [originYHigh, originYLow] = splitFloat64(origin[1]);
+  return {
+    u_projection_matrix: translateMatrix(
+      args.defaultProjectionData.mainMatrix,
+      origin[0],
+      origin[1],
+    ),
+    u_origin_high: new Float32Array([originXHigh, originYHigh]),
+    u_origin_low: new Float32Array([originXLow, originYLow]),
+  };
+}
+
+/**
+ * Per-frame uniforms for the globe vertex shader: everything MapLibre's globe
+ * prelude declares, passed through from `defaultProjectionData` untouched.
+ * Positions are absolute under globe, so no translation is folded in.
+ *
+ * Exported for unit testing.
+ */
+export function globeFrameUniforms(
+  args: CustomRenderMethodInput,
+): Record<string, UniformValue> {
+  const {
+    mainMatrix,
+    tileMercatorCoords,
+    clippingPlane,
+    projectionTransition,
+    fallbackMatrix,
+  } = args.defaultProjectionData;
+  return {
+    u_projection_matrix: new Float32Array(mainMatrix),
+    u_projection_tile_mercator_coords: new Float32Array(tileMercatorCoords),
+    u_projection_clipping_plane: new Float32Array(clippingPlane),
+    u_projection_transition: projectionTransition,
+    u_projection_fallback_matrix: new Float32Array(fallbackMatrix),
+  };
 }
 
 /**

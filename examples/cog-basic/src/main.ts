@@ -2,7 +2,7 @@ import { COGLayer } from "@yutannihilation/maplibre-warp-geotiff";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import type { LayerSpecification } from "maplibre-gl";
+import type { LayerSpecification, ProjectionSpecification } from "maplibre-gl";
 // maplibre-gl v6 resolves its worker through a dynamic `new URL()`, which no
 // bundler can statically analyse, so the worker chunk is never emitted and the
 // production build 404s on it. Bundle it explicitly and hand over the URL, as
@@ -18,6 +18,7 @@ const LAYER_ID = "cog";
 
 const statusEl = document.getElementById("status") as HTMLDivElement;
 const selectEl = document.getElementById("dataset") as HTMLSelectElement;
+const projectionEl = document.getElementById("projection") as HTMLSelectElement;
 
 for (const dataset of DATASETS) {
   const option = document.createElement("option");
@@ -105,12 +106,34 @@ function showSelectedDataset(): void {
   }
 }
 
+/**
+ * Apply whichever projection the `<select>` currently names.
+ *
+ * The projection is a property of the map, not of the layer: the layer reads
+ * MapLibre's current shader variant every frame and follows it. This control
+ * only exists to exercise that.
+ *
+ * Guarded the same way as the dataset selector, because `setProjection` throws
+ * before the style has loaded — a change made in that first moment would
+ * otherwise be lost and leave the dropdown disagreeing with the map.
+ */
+function applySelectedProjection(): void {
+  if (!styleReady) {
+    return;
+  }
+  map.setProjection({
+    type: projectionEl.value as ProjectionSpecification["type"],
+  });
+}
+
 map.on("load", () => {
   styleReady = true;
   showSelectedDataset();
+  applySelectedProjection();
 });
 
 selectEl.addEventListener("change", showSelectedDataset);
+projectionEl.addEventListener("change", applySelectedProjection);
 
 // Surface WebGL errors in the example rather than letting them scroll past.
 map.on("error", (event: { error: unknown }) => {

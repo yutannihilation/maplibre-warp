@@ -4,7 +4,9 @@ import {
 } from "@math.gl/culling";
 import { describe, expect, it } from "vitest";
 
+import { projectionFromVariant } from "../src/projection.js";
 import {
+  createRasterViewport,
   extractFrustumPlanes,
   unitsPerMeterAtLatitude,
 } from "../src/viewport-shim.js";
@@ -101,6 +103,30 @@ describe("extractFrustumPlanes", () => {
     const planes = extractFrustumPlanes(new Float64Array(16));
     expect(planes).toHaveLength(0);
   });
+
+  it("leaves out near and far with `sidesOnly`", () => {
+    const m = ortho(-1, 1, -1, 1, -1, 1);
+    const sides = extractFrustumPlanes(m, { sidesOnly: true });
+    expect(sides).toHaveLength(4);
+
+    // Far beyond the far plane along z: the full frustum rejects it, the side
+    // planes alone do not — which is what the globe path wants, since the
+    // globe shader replaces clip z with its own horizon term.
+    const point: [number, number, number] = [0, 0, 5];
+    expect(
+      extractFrustumPlanes(m).some((p) => p.getPointDistance(point) < 0),
+    ).toBe(true);
+    expect(sides.every((p) => p.getPointDistance(point) > 0)).toBe(true);
+  });
+});
+
+describe("projectionFromVariant", () => {
+  it("recognises MapLibre's two variants and nothing else", () => {
+    expect(projectionFromVariant("mercator")).toBe("mercator");
+    expect(projectionFromVariant("globe")).toBe("globe");
+    expect(projectionFromVariant("vertical-perspective")).toBeUndefined();
+    expect(projectionFromVariant("")).toBeUndefined();
+  });
 });
 
 describe("unitsPerMeterAtLatitude", () => {
@@ -119,5 +145,95 @@ describe("unitsPerMeterAtLatitude", () => {
   it("clamps past the Web Mercator latitude limit", () => {
     expect(unitsPerMeterAtLatitude(90)).toEqual(unitsPerMeterAtLatitude(89));
     expect(Number.isFinite(unitsPerMeterAtLatitude(90))).toBe(true);
+  });
+});
+
+/** Enough of MapLibre's `Map` for {@link createRasterViewport}. */
+function makeMap(center: { lng: number; lat: number }, zoom: number) {
+  return {
+    getZoom: () => zoom,
+    getCenter: () => center,
+    getBounds: () => ({
+      getWest: () => center.lng - 10,
+      getSouth: () => center.lat - 10,
+      getEast: () => center.lng + 10,
+      getNorth: () => center.lat + 10,
+    }),
+  } as unknown as Parameters<typeof createRasterViewport>[0];
+}
+
+function makeArgs(
+  variantName: string,
+  projectionData: Record<string, unknown>,
+): Parameters<typeof createRasterViewport>[1] {
+  return {
+    shaderData: { variantName, vertexShaderPrelude: "", define: "" },
+    defaultProjectionData: projectionData,
+  } as unknown as Parameters<typeof createRasterViewport>[1];
+}
+
+const gl = {
+  canvas: { width: 800 },
+  drawingBufferWidth: 800,
+} as unknown as WebGL2RenderingContext;
+
+describe("createRasterViewport", () => {
+  // A camera above (lng 0, lat 0) whose visible cap is `z > 0.3`.
+  const clippingPlane = [0, 0, 1, -0.3];
+
+  it("culls on the unit sphere under globe", () => {
+    const viewport = createRasterViewport(
+      makeMap({ lng: 8, lat: 47 }, 3),
+      makeArgs("globe", {
+        mainMatrix: ortho(-1, 1, -1, 1, -1, 1),
+        fallbackMatrix: new Float64Array(16),
+        tileMercatorCoords: [0, 0, 1, 1],
+        clippingPlane,
+        projectionTransition: 1,
+      }),
+      gl,
+    );
+
+    expect(viewport.projection).toBe("globe");
+    expect(viewport.center).toEqual([8, 47]);
+    // Four sides of the globe matrix plus MapLibre's horizon plane: without
+    // the horizon, tiles on the far side of the planet would never be culled.
+    expect(viewport.frustumPlanes).toHaveLength(5);
+    const horizon = viewport.frustumPlanes[4]!;
+    expect(horizon.getPointDistance([0, 0, 1])).toBeGreaterThan(0);
+    expect(horizon.getPointDistance([0, 0, -1])).toBeLessThan(0);
+    // Elevation is in sphere radii under globe, not common-space units.
+    expect(viewport.unitsPerMeter).toBeCloseTo(1 / 6371008.8, 15);
+    expect(
+      viewport.projection === "globe" ? viewport.cameraDirection : undefined,
+    ).toEqual([0, 0, 1]);
+  });
+
+  it("culls in common space under mercator", () => {
+    const viewport = createRasterViewport(
+      makeMap({ lng: 8, lat: 60 }, 3),
+      makeArgs("mercator", {
+        mainMatrix: ortho(-1, 1, -1, 1, -1, 1),
+        fallbackMatrix: new Float64Array(16),
+        tileMercatorCoords: [0, 0, 1, 1],
+        clippingPlane,
+        projectionTransition: 0,
+      }),
+      gl,
+    );
+
+    expect(viewport.projection).toBe("mercator");
+    expect(viewport.frustumPlanes).toHaveLength(6);
+    expect(viewport.unitsPerMeter).toBeCloseTo(unitsPerMeterAtLatitude(60), 15);
+  });
+
+  it("refuses a variant it cannot place a frustum in", () => {
+    expect(() =>
+      createRasterViewport(
+        makeMap({ lng: 0, lat: 0 }, 3),
+        makeArgs("vertical-perspective", {}),
+        gl,
+      ),
+    ).toThrow(/vertical-perspective/);
   });
 });

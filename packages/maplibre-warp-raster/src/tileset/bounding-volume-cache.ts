@@ -3,16 +3,30 @@
 
 import type { OrientedBoundingBox } from "@math.gl/culling";
 
+import type { SpherePoint } from "../globe.js";
 import type { Bounds, ZRange } from "./types.js";
+import type { ViewportProjection } from "./viewport.js";
 
 /**
- * A memoized tile bounding volume, tagged with the elevation range it was
- * computed for (so a `zRange` change can invalidate it).
+ * A memoized tile bounding volume, tagged with the elevation range and the
+ * projection it was computed for (so a change in either can invalidate it).
  */
 export interface BoundingVolumeCacheEntry {
   zRange: ZRange;
-  boundingVolume: OrientedBoundingBox;
+  /** The space {@link boundingVolume} lives in. */
+  projection: ViewportProjection;
+  /**
+   * The frustum-culling volume, or `null` for a tile too large to bound
+   * usefully (a globe tile spanning a large arc), which is then never culled.
+   */
+  boundingVolume: OrientedBoundingBox | null;
+  /**
+   * `[minX, minY, maxX, maxY]` in common space. Kept under every projection:
+   * the dataset-bounds check and centre-out request ordering use it.
+   */
   commonSpaceBounds: Bounds;
+  /** Globe only: the tile centre on the unit sphere, for LOD foreshortening. */
+  sphereCenter?: SpherePoint;
 }
 
 /**
@@ -40,13 +54,13 @@ const DEFAULT_MAX_ENTRIES = 65_536;
  * The raster tile traversal recomputes a tile's bounding volume (several proj4
  * reprojections plus an oriented-bounding-box fit) only on a cache miss; on a
  * hit it returns the stored volume. A tile's bounding volume depends only on
- * `(z, x, y, zRange)` for a given tileset descriptor, so it is safe to memoize
- * across traversals (i.e. across animation frames).
+ * `(z, x, y, zRange, projection)` for a given tileset descriptor, so it is
+ * safe to memoize across traversals (i.e. across animation frames).
  *
- * The key is valid only within a single projection mode. A tile's bounding
- * volume would be computed in a different common space under a globe
- * projection, so the cache must be {@link BoundingVolumeCache.clear cleared}
- * if globe support is added and the projection mode changes.
+ * Entries are tagged with the `zRange` and projection they were computed for;
+ * the traversal treats a mismatch as a miss and recomputes, so a
+ * globe↔mercator switch needs no explicit invalidation. Stale entries from
+ * the other projection age out through {@link sweep}.
  */
 export class BoundingVolumeCache {
   private entries = new Map<string, BoundingVolumeCacheEntry>();
@@ -86,11 +100,7 @@ export class BoundingVolumeCache {
     this.entries.set(key, entry);
   }
 
-  /**
-   * Drop all cached entries. Called by the owner when the viewport's projection
-   * mode changes (globe↔mercator), since volumes computed under one projection
-   * are not valid under the other.
-   */
+  /** Drop all cached entries. */
   clear(): void {
     this.entries.clear();
   }
