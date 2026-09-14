@@ -2,8 +2,11 @@
 // packages/deck.gl-geotiff/src/geotiff-tileset.ts
 
 import type { GeoTIFF, Overview } from "@developmentseed/geotiff";
-import type { ProjectionFunction } from "@maplibre-cog-warp/raster";
-import { AffineTileset, AffineTilesetLevel } from "@maplibre-cog-warp/raster";
+import type { ProjectionFunction } from "@yutannihilation/maplibre-warp-raster";
+import {
+  AffineTileset,
+  AffineTilesetLevel,
+} from "@yutannihilation/maplibre-warp-raster";
 
 /**
  * Build an {@link AffineTileset} from a {@link GeoTIFF}: one level per

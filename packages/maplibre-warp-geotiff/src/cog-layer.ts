@@ -22,7 +22,7 @@ import type {
   RasterSource,
   RasterTilePayload,
   TileIndex,
-} from "@maplibre-cog-warp/raster";
+} from "@yutannihilation/maplibre-warp-raster";
 import {
   buildTileMesh,
   createInitialWebMercatorTriangulation,
@@ -32,7 +32,7 @@ import {
   MAX_WEB_MERCATOR_LAT,
   mercatorFromEPSG3857,
   RasterCustomLayer,
-} from "@maplibre-cog-warp/raster";
+} from "@yutannihilation/maplibre-warp-raster";
 import type { Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
 import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";

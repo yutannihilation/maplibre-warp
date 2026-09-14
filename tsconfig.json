@@ -3,7 +3,7 @@
   "files": [],
   "exclude": ["node_modules"],
   "references": [
-    { "path": "packages/maplibre-raster/tsconfig.build.json" },
-    { "path": "packages/maplibre-geotiff/tsconfig.build.json" }
+    { "path": "packages/maplibre-warp-raster/tsconfig.build.json" },
+    { "path": "packages/maplibre-warp-geotiff/tsconfig.build.json" }
   ]
 }

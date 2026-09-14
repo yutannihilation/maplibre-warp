@@ -14,16 +14,16 @@ export default defineConfig({
     // Longest specifier first — Vite matches these in order.
     alias: [
       {
-        find: "@maplibre-cog-warp/raster/gpu-modules",
-        replacement: src("maplibre-raster/src/gpu-modules/index.ts"),
+        find: "@yutannihilation/maplibre-warp-raster/gpu-modules",
+        replacement: src("maplibre-warp-raster/src/gpu-modules/index.ts"),
       },
       {
-        find: "@maplibre-cog-warp/raster",
-        replacement: src("maplibre-raster/src/index.ts"),
+        find: "@yutannihilation/maplibre-warp-raster",
+        replacement: src("maplibre-warp-raster/src/index.ts"),
       },
       {
-        find: "@maplibre-cog-warp/geotiff",
-        replacement: src("maplibre-geotiff/src/index.ts"),
+        find: "@yutannihilation/maplibre-warp-geotiff",
+        replacement: src("maplibre-warp-geotiff/src/index.ts"),
       },
     ],
   },

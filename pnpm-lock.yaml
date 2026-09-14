@@ -127,12 +127,12 @@ importers:
 
   examples/cog-basic:
     dependencies:
-      '@maplibre-cog-warp/geotiff':
+      '@yutannihilation/maplibre-warp-geotiff':
         specifier: workspace:^
-        version: link:../../packages/maplibre-geotiff
-      '@maplibre-cog-warp/raster':
+        version: link:../../packages/maplibre-warp-geotiff
+      '@yutannihilation/maplibre-warp-raster':
         specifier: workspace:^
-        version: link:../../packages/maplibre-raster
+        version: link:../../packages/maplibre-warp-raster
       maplibre-gl:
         specifier: 6.7.0
         version: 6.7.0
@@ -141,7 +141,7 @@ importers:
         specifier: 8.2.2
         version: 8.2.2(@types/node@26.4.1)
 
-  packages/maplibre-geotiff:
+  packages/maplibre-warp-geotiff:
     dependencies:
       '@cogeotiff/core':
         specifier: ^9.5.0
@@ -152,9 +152,9 @@ importers:
       '@developmentseed/proj':
         specifier: 0.8.0-beta.2
         version: 0.8.0-beta.2
-      '@maplibre-cog-warp/raster':
+      '@yutannihilation/maplibre-warp-raster':
         specifier: workspace:^
-        version: link:../maplibre-raster
+        version: link:../maplibre-warp-raster
       proj4:
         specifier: ^2.20.9
         version: 2.22.0
@@ -163,7 +163,7 @@ importers:
         specifier: 6.7.0
         version: 6.7.0
 
-  packages/maplibre-raster:
+  packages/maplibre-warp-raster:
     dependencies:
       '@developmentseed/affine':
         specifier: 0.8.0-beta.2

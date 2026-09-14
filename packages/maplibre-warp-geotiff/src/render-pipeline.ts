@@ -12,7 +12,7 @@
 import { Photometric, SampleFormat } from "@cogeotiff/core";
 import type { DecoderPool, GeoTIFF, Overview } from "@developmentseed/geotiff";
 import { parseColormap } from "@developmentseed/geotiff";
-import type { RenderPipeline } from "@maplibre-cog-warp/raster";
+import type { RenderPipeline } from "@yutannihilation/maplibre-warp-raster";
 import {
   BlackIsZero,
   CieLabToRGB,
@@ -22,7 +22,7 @@ import {
   FilterNoDataVal,
   MaskTexture,
   WhiteIsZero,
-} from "@maplibre-cog-warp/raster/gpu-modules";
+} from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 
 import { addAlphaChannel, toGlView } from "./geotiff-utils.js";
 import {

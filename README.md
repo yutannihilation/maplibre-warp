@@ -1,4 +1,4 @@
-# maplibre-cog-warp
+# maplibre-warp
 
 Render Cloud-Optimized GeoTIFFs as a **native MapLibre GL JS custom layer**,
 reprojecting from the file's own CRS on the GPU — no deck.gl, no server-side
@@ -13,7 +13,7 @@ MapLibre's `CustomLayerInterface` and raw WebGL2.
 
 ```ts
 import * as maplibregl from "maplibre-gl";
-import { COGLayer } from "@maplibre-cog-warp/geotiff";
+import { COGLayer } from "@yutannihilation/maplibre-warp-geotiff";
 
 const map = new maplibregl.Map({ container: "map", style: "…" });
 
@@ -43,8 +43,8 @@ and the data reaches the GPU unquantised.
 
 | Package | What it is |
 | --- | --- |
-| `@maplibre-cog-warp/raster` | Renderer core: the custom-layer base class, tile scheduler, warp mesh, shader assembly and program cache. Source-format agnostic. |
-| `@maplibre-cog-warp/geotiff` | COG specifics: opening the file, building the tile pyramid, inferring a render pipeline from TIFF tags, texture formats. |
+| `@yutannihilation/maplibre-warp-raster` | Renderer core: the custom-layer base class, tile scheduler, warp mesh, shader assembly and program cache. Source-format agnostic. |
+| `@yutannihilation/maplibre-warp-geotiff` | COG specifics: opening the file, building the tile pyramid, inferring a render pipeline from TIFF tags, texture formats. |
 
 `examples/cog-basic` is a Vite app with three datasets that exercise different
 paths: swisstopo PK1000 (EPSG:2056 oblique Mercator, RGB), NLCD land cover

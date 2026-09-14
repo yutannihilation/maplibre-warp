@@ -6,5 +6,5 @@
     "outDir": "./dist"
   },
   "include": ["src/**/*"],
-  "references": [{ "path": "../maplibre-raster/tsconfig.build.json" }]
+  "references": [{ "path": "../maplibre-warp-raster/tsconfig.build.json" }]
 }

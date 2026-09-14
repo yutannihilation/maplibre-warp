@@ -1,4 +1,4 @@
-import { COGLayer } from "@maplibre-cog-warp/geotiff";
+import { COGLayer } from "@yutannihilation/maplibre-warp-geotiff";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 

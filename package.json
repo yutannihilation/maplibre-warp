@@ -1,5 +1,5 @@
 {
-  "name": "maplibre-cog-warp-monorepo",
+  "name": "maplibre-warp-monorepo",
   "version": "0.0.0",
   "private": true,
   "type": "module",

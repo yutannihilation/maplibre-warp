@@ -1,7 +1,7 @@
 {
-  "name": "@maplibre-cog-warp/raster",
+  "name": "@yutannihilation/maplibre-warp-geotiff",
   "version": "0.0.0",
-  "description": "Reprojecting raster renderer core for MapLibre GL JS custom layers",
+  "description": "Cloud-Optimized GeoTIFF custom layer for MapLibre GL JS",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -9,10 +9,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./gpu-modules": {
-      "types": "./dist/gpu-modules/index.d.ts",
-      "default": "./dist/gpu-modules/index.js"
     }
   },
   "sideEffects": false,
@@ -25,10 +21,11 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@developmentseed/affine": "0.8.0-beta.2",
+    "@cogeotiff/core": "^9.5.0",
+    "@developmentseed/geotiff": "0.8.0-beta.2",
     "@developmentseed/proj": "0.8.0-beta.2",
-    "@developmentseed/raster-reproject": "0.8.0-beta.2",
-    "@math.gl/culling": "^4.1.0"
+    "@yutannihilation/maplibre-warp-raster": "workspace:^",
+    "proj4": "^2.20.9"
   },
   "peerDependencies": {
     "maplibre-gl": "^6.7.0"
