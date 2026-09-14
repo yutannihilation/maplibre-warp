@@ -231,6 +231,12 @@ export class RasterTileNode {
      */
     pixelRatio: number;
     /**
+     * Level-of-detail bias in zoom levels. `0` selects a tile once its source
+     * pixels are at most one framebuffer pixel wide; each `+1` doubles the
+     * allowed size, so the pyramid is cut one level coarser.
+     */
+    lodBias: number;
+    /**
      * Bounding-volume cache shared by every node in this traversal. Populated
      * lazily as tiles are visited; reused across `getTileIndices` calls so
      * animation frames don't recompute proj4 reprojections + oriented-
@@ -246,6 +252,7 @@ export class RasterTileNode {
       maxZ = this.descriptor.levels.length - 1,
       bounds,
       pixelRatio,
+      lodBias,
       boundingVolumeCache,
     } = params;
 
@@ -288,12 +295,13 @@ export class RasterTileNode {
       const tileMetersPerPixel = this.level.metersPerPixel;
 
       // On-screen size of one source pixel, measured in framebuffer pixels.
-      // ≤ 1 means the source can fully resolve the rendered framebuffer.
+      // ≤ 1 means the source can fully resolve the rendered framebuffer; the
+      // bias relaxes that by a power of two per zoom level.
       const devicePixelsPerSourcePixel =
         (tileMetersPerPixel * pixelRatio) / metersPerCSSPixel;
 
       if (
-        devicePixelsPerSourcePixel <= 1 ||
+        devicePixelsPerSourcePixel <= 2 ** lodBias ||
         this.z >= maxZ ||
         (children === null && this.z >= minZ)
       ) {
@@ -635,6 +643,11 @@ export function getTileIndices(
     zRange: ZRange | null;
     wgs84Bounds: Bounds;
     /**
+     * Level-of-detail bias in zoom levels; see
+     * {@link RasterTileNode.update}. Defaults to `0`.
+     */
+    lodBias?: number;
+    /**
      * Cache for tile bounding volumes, reused across calls so repeated
      * traversals (animation frames) don't redo the proj4 reprojections +
      * oriented-bounding-box fit. If omitted, a throwaway cache is used — it
@@ -644,7 +657,7 @@ export function getTileIndices(
     boundingVolumeCache?: BoundingVolumeCache;
   },
 ): TileIndex[] {
-  const { viewport, maxZ, zRange, wgs84Bounds } = opts;
+  const { viewport, maxZ, zRange, wgs84Bounds, lodBias = 0 } = opts;
 
   const boundingVolumeCache =
     opts.boundingVolumeCache ?? new BoundingVolumeCache();
@@ -690,6 +703,7 @@ export function getTileIndices(
     maxZ,
     bounds,
     pixelRatio: viewport.pixelRatio,
+    lodBias,
     boundingVolumeCache,
   };
 
@@ -716,7 +730,8 @@ export function getTileIndices(
  * convention) while being driven by a 512-pixel-tile zoom, which makes it
  * select one overview level coarser than the display can resolve. We use the
  * correct exponent, so this layer fetches ~4× more tiles than deck.gl-raster
- * for the same view and renders correspondingly sharper.
+ * for the same view and renders correspondingly sharper. `lodBias: 1`
+ * reproduces deck.gl-raster's selection for callers who prefer the trade.
  */
 function getMetersPerPixel(latitude: number, zoom: number): number {
   return (

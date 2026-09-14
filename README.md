@@ -65,6 +65,23 @@ than a framebuffer pixel. Because a COG pyramid is a stack of independent grids
 rather than a quadtree, children are found by mapping a tile's source-CRS bounds
 into the next level's grid.
 
+**Tile loading.** Requests are issued centre-out and go through
+`@developmentseed/geotiff`'s per-origin connection pool, which is small (six
+for HTTP/1.1) and first-come-first-served. To keep that queue from filling with
+tiles the view has moved on from, the scheduler starts no loads while the map
+is zooming — every intermediate zoom would select a level the user never ends
+up looking at — and aborts loads for tiles that have scrolled off screen once
+more than `maxConcurrentRequests` are in flight. Loads still overlapping the
+view are kept even after a level change, because a tile that is not the
+selected level still gets drawn: while a selected tile loads, its loaded
+ancestors and any loaded descendants up to two levels finer stand in for it,
+so a small zoom-out keeps the detail already on screen instead of dropping to
+a coarse overview. Loaded tiles are cached up to `maxCacheSize` tiles /
+`maxCacheByteSize` bytes; in-flight loads do not count, and the loaded
+ancestors of whatever is on screen are never evicted. `lodBias` trades sharpness for
+tile count: `1` fetches what deck.gl-raster does for the same view, about a
+quarter of the default.
+
 **Warping.** Each tile's mesh comes from `@developmentseed/raster-reproject`
 (Delatin, refined until the reprojection error falls below 0.125 source pixels),
 evaluated straight into MapLibre mercator `[0, 1]` in float64. Flat areas get a

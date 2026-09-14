@@ -32,11 +32,18 @@ const source: RasterSource = {
   loadTile: () => Promise.reject(new Error("not used")),
 };
 
-/** A map stub exposing only what the source-open path touches. */
+/** A map stub exposing only what `onAdd`/`onRemove` and source opening touch. */
 function makeMap() {
-  return { triggerRepaint: vi.fn() } as unknown as Parameters<
-    RasterCustomLayer["onAdd"]
-  >[0];
+  return {
+    triggerRepaint: vi.fn(),
+    on: vi.fn(),
+    off: vi.fn(),
+    isZooming: () => false,
+  } as unknown as Parameters<RasterCustomLayer["onAdd"]>[0] & {
+    triggerRepaint: ReturnType<typeof vi.fn>;
+    on: ReturnType<typeof vi.fn>;
+    off: ReturnType<typeof vi.fn>;
+  };
 }
 
 const gl = {} as WebGL2RenderingContext;
@@ -200,6 +207,29 @@ describe("RasterCustomLayer source opening", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("RasterCustomLayer zoom handling", () => {
+  it("repaints when a zoom ends so deferred loads start, and unsubscribes on remove", () => {
+    const layer = new TestLayer({ id: "t" }, () => Promise.resolve(source));
+    const map = makeMap();
+
+    layer.onAdd(map, gl);
+    const subscription = map.on.mock.calls.find(
+      ([event]) => event === "zoomend",
+    );
+    expect(subscription).toBeDefined();
+    const handler = subscription![1] as () => void;
+
+    // Loads are held back while zooming and MapLibre does not repaint once
+    // the zoom settles, so `zoomend` has to trigger the frame that starts them.
+    expect(map.triggerRepaint).not.toHaveBeenCalled();
+    handler();
+    expect(map.triggerRepaint).toHaveBeenCalledTimes(1);
+
+    layer.onRemove(map, gl);
+    expect(map.off).toHaveBeenCalledWith("zoomend", handler);
   });
 });
 
