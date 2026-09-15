@@ -150,7 +150,7 @@ export function parseCssColor(input: string): Rgba {
 export interface BandColorImage {
   width: number;
   height: 1;
-  /** RGBA8, one texel per band. */
+  /** RGBA8, one texel per band (or per ramp sample, see `gradientColorImage`). */
   data: Uint8Array;
 }
 
@@ -165,4 +165,61 @@ export function bandColorImage(colors: readonly string[]): BandColorImage {
 /** Colour as a `vec4` in 0–1, for uniforms. */
 export function colorToVec4(color: string): Float32Array {
   return Float32Array.from(parseCssColor(color), (v) => v / 255);
+}
+
+/** How many stops a colour function is sampled at for a gradient. */
+export const GRADIENT_FUNCTION_STOPS = 64;
+
+/** Width of the ramp texture a gradient is rendered from. */
+export const GRADIENT_IMAGE_WIDTH = 256;
+
+/**
+ * Colour stops for a continuous ramp over `[0, 1]`. An array is used as-is,
+ * its entries evenly spaced, and needs at least two entries; a function is
+ * sampled at {@link GRADIENT_FUNCTION_STOPS} positions. The same stops feed
+ * the ramp texture and a legend, so the two cannot disagree.
+ */
+export function resolveGradientStops(colors: BandColors): string[] {
+  if (typeof colors === "function") {
+    return resolveBandColors(colors, GRADIENT_FUNCTION_STOPS);
+  }
+  if (colors.length < 2) {
+    throw new RangeError(
+      `a gradient needs at least two colour stops, got ${colors.length}`,
+    );
+  }
+  return [...colors];
+}
+
+/**
+ * A `width × 1` RGBA8 ramp: the stops evenly spaced along the row and
+ * linearly interpolated in straight (non-premultiplied) RGBA between them.
+ * Sampled LINEAR on the GPU, so the default width is ample for any scheme.
+ */
+export function gradientColorImage(
+  stops: readonly string[],
+  width = GRADIENT_IMAGE_WIDTH,
+): BandColorImage {
+  if (stops.length < 2) {
+    throw new RangeError(
+      `a gradient needs at least two colour stops, got ${stops.length}`,
+    );
+  }
+  if (!Number.isInteger(width) || width < 2) {
+    throw new RangeError(`gradient width must be an integer ≥ 2, got ${width}`);
+  }
+  const parsed = stops.map(parseCssColor);
+  const data = new Uint8Array(width * 4);
+  const lastStop = parsed.length - 1;
+  for (let x = 0; x < width; x++) {
+    const position = (x / (width - 1)) * lastStop;
+    const i = Math.min(Math.floor(position), lastStop - 1);
+    const f = position - i;
+    const a = parsed[i]!;
+    const b = parsed[i + 1]!;
+    for (let c = 0; c < 4; c++) {
+      data[x * 4 + c] = Math.round(a[c]! + (b[c]! - a[c]!) * f);
+    }
+  }
+  return { width, height: 1, data };
 }

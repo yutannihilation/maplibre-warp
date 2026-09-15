@@ -226,6 +226,7 @@ export type {
   ContourLineProps,
   IsobandProps,
   PackedThresholds,
+  ValueGradientProps,
   ValueSamplerKind,
   ValueTextureProps,
 } from "./contour.js";
@@ -235,6 +236,7 @@ export {
   Isoband,
   MAX_THRESHOLDS,
   packThresholds,
+  ValueGradient,
   ValueTexture,
 } from "./contour.js";
 export type {
@@ -249,7 +251,11 @@ export {
   bandColorImage,
   bandsFromThresholds,
   colorToVec4,
+  GRADIENT_FUNCTION_STOPS,
+  GRADIENT_IMAGE_WIDTH,
+  gradientColorImage,
   parseCssColor,
   resolveBandColors,
+  resolveGradientStops,
   validateThresholds,
 } from "./contour-bands.js";

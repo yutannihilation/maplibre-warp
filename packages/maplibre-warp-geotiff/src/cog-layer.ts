@@ -39,8 +39,10 @@ import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
 import { abortError, fetchGeoTIFF } from "./geotiff-utils.js";
 import type {
   ContourBandWithColor,
+  ContourGradient,
   ContourRenderOptions,
   GeoTiffRenderer,
+  ResolvedContourOptions,
 } from "./render-pipeline.js";
 import {
   inferRenderPipeline,
@@ -85,8 +87,10 @@ export interface COGLayerProps extends RasterCustomLayerProps {
   maxError?: number;
 
   /**
-   * Render the raster as filled contour bands and/or lines instead of as
-   * imagery. See {@link ContourRenderOptions}.
+   * Render the raster as contours — filled bands or a continuous gradient,
+   * with or without lines — instead of as imagery. See
+   * {@link ContourRenderOptions}; {@link COGLayer.setContour} switches
+   * between them live.
    */
   contour?: ContourRenderOptions;
 
@@ -122,6 +126,8 @@ export class COGLayer extends RasterCustomLayer {
   private contour?: ContourRenderOptions;
   /** Band model of {@link contour}, resolved once alongside its validation. */
   private contourBands: ContourBandWithColor[] = [];
+  /** Gradient model of {@link contour}, likewise. */
+  private contourGradient: ContourGradient | null = null;
   private renderer?: GeoTiffRenderer;
   private geotiff?: GeoTIFF;
 
@@ -129,10 +135,21 @@ export class COGLayer extends RasterCustomLayer {
     super(props);
     if (props.contour) {
       // Fail here rather than inside the retried source-open path.
-      this.contourBands = resolveContourOptions(props.contour).bands;
+      this.rememberContourModel(resolveContourOptions(props.contour));
     }
     this.props = props;
     this.contour = props.contour;
+  }
+
+  private rememberContourModel(resolved: ResolvedContourOptions): void {
+    this.contourBands = resolved.bands;
+    this.contourGradient = resolved.gradient
+      ? {
+          min: resolved.gradient.min,
+          max: resolved.gradient.max,
+          stops: resolved.gradient.stops,
+        }
+      : null;
   }
 
   /** The opened GeoTIFF, once the header has been read. */
@@ -142,25 +159,34 @@ export class COGLayer extends RasterCustomLayer {
 
   /**
    * The contour band model with colours, for legends. Available before the
-   * COG has opened, since it depends only on the options; empty without
-   * `contour.bands`.
+   * COG has opened, since it depends only on the options; empty unless the
+   * fill is `"bands"`.
    */
   getBands(): ContourBandWithColor[] {
     return this.contourBands.slice();
   }
 
   /**
-   * Re-style the contours without reloading anything: thresholds, band
-   * colours, `includeLower`/`includeUpper` and line style are uniforms and a
-   * lookup texture, so tiles already on the GPU pick the change up on the
-   * next frame. Takes effect immediately when the layer is on a map, or at
-   * `onAdd` otherwise.
+   * The gradient fill's domain and colour stops, for legends. Available
+   * before the COG has opened; `null` unless the fill is `"gradient"`.
+   */
+  getGradient(): ContourGradient | null {
+    return this.contourGradient
+      ? { ...this.contourGradient, stops: this.contourGradient.stops.slice() }
+      : null;
+  }
+
+  /**
+   * Re-style the contours without reloading anything: thresholds, colours,
+   * the fill mode (`"bands"`, `"gradient"`, `"none"`), lines on or off and
+   * their style. Tiles already on the GPU pick the change up on the next
+   * frame; a new module chain is compiled on demand. Takes effect immediately
+   * when the layer is on a map, or at `onAdd` otherwise.
    *
-   * What a compiled program and its built tiles cannot follow is refused with
-   * a `RangeError`, as is any option that fails the constructor's validation:
-   * the layer must have been created with `contour`, and the new options may
-   * not switch `bands` or `lines` on or off nor change `band`. Recreate the
-   * layer for those.
+   * Refused with a `RangeError`: any option that fails the constructor's
+   * validation, a layer created without `contour` (its tiles hold imagery
+   * textures, not values), and changing `band`. Recreate the layer for
+   * those.
    */
   setContour(contour: ContourRenderOptions): void {
     if (!this.contour) {
@@ -182,7 +208,7 @@ export class COGLayer extends RasterCustomLayer {
       this.map?.triggerRepaint();
     }
     this.contour = contour;
-    this.contourBands = resolved.bands;
+    this.rememberContourModel(resolved);
   }
 
   override onRemove(map: MapLibreMap, gl: WebGL2RenderingContext): void {

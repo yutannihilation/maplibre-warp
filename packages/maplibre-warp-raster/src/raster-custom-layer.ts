@@ -158,7 +158,7 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
   private sourceController?: AbortController;
   private warnedUnsupportedProjection = false;
 
-  opacity: number;
+  private _opacity: number;
   private readonly maxCacheByteSize: number | undefined;
   private readonly maxCacheSize: number | undefined;
   private readonly maxConcurrentRequests: number | undefined;
@@ -169,7 +169,7 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
 
   constructor(props: RasterCustomLayerProps) {
     this.id = props.id;
-    this.opacity = props.opacity ?? 1;
+    this._opacity = validateOpacity(props.opacity ?? 1);
     this.maxCacheByteSize = props.maxCacheByteSize;
     this.maxCacheSize = props.maxCacheSize;
     this.maxConcurrentRequests = props.maxConcurrentRequests;
@@ -177,6 +177,21 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     this.retryBaseDelay = props.retryBaseDelay ?? DEFAULT_RETRY_BASE_DELAY;
     this.maxRetries = props.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.zRange = props.zRange ?? null;
+  }
+
+  /** Layer opacity in `[0, 1]`; see {@link setOpacity}. */
+  get opacity(): number {
+    return this._opacity;
+  }
+
+  /**
+   * Set the layer opacity in `[0, 1]`. It is a per-frame uniform, so every
+   * tile already on the GPU picks it up on the next frame and nothing is
+   * reloaded. Repaints when the layer is on a map.
+   */
+  setOpacity(opacity: number): void {
+    this._opacity = validateOpacity(opacity);
+    this.map?.triggerRepaint();
   }
 
   /**
@@ -345,7 +360,7 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
       projection === "globe"
         ? globeFrameUniforms(args)
         : mercatorFrameUniforms(map, args);
-    frameUniforms.u_opacity = this.opacity;
+    frameUniforms.u_opacity = this._opacity;
 
     this.drawTiles(gl, args, drawList, frameUniforms);
   }
@@ -436,6 +451,13 @@ export function globeFrameUniforms(
     u_projection_transition: projectionTransition,
     u_projection_fallback_matrix: new Float32Array(fallbackMatrix),
   };
+}
+
+function validateOpacity(opacity: number): number {
+  if (!(Number.isFinite(opacity) && opacity >= 0 && opacity <= 1)) {
+    throw new RangeError(`opacity must be a number in [0, 1], got ${opacity}`);
+  }
+  return opacity;
 }
 
 /**

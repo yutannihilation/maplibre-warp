@@ -27,6 +27,7 @@ import type {
   ContourLineProps,
   IsobandProps,
   PackedThresholds,
+  ValueGradientProps,
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 import {
   BlackIsZero,
@@ -40,10 +41,13 @@ import {
   CreateTexture,
   colorToVec4,
   FilterNoDataVal,
+  gradientColorImage,
   Isoband,
   MaskTexture,
   packThresholds,
   resolveBandColors,
+  resolveGradientStops,
+  ValueGradient,
   ValueTexture,
   WhiteIsZero,
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
@@ -80,15 +84,32 @@ export interface GeoTiffTileTextures {
   byteLength: number;
 }
 
-/** Filled-band configuration for {@link ContourRenderOptions}. */
+/**
+ * Colour configuration for the fill of {@link ContourRenderOptions}, shared
+ * by the `"bands"` and `"gradient"` fills.
+ */
 export interface ContourBandOptions {
-  /** One CSS colour per emitted band, or an interpolator over `[0, 1]`. */
+  /**
+   * For `"bands"`: one CSS colour per emitted band, or an interpolator over
+   * `[0, 1]` called once per band. For `"gradient"`: the ramp's stops, at
+   * least two, evenly spaced, or an interpolator sampled along the ramp.
+   */
   colors: BandColors;
-  /** Emit the band below the first threshold. @default false */
+  /**
+   * Emit the band below the first threshold; for a gradient, paint values
+   * below the first threshold with the first colour instead of leaving them
+   * transparent. @default false
+   */
   includeLower?: boolean;
-  /** Emit the band above the last threshold. @default true */
+  /**
+   * Emit the band above the last threshold; for a gradient, paint values at
+   * or above the last threshold with the last colour. @default true
+   */
   includeUpper?: boolean;
 }
+
+/** How the area between contour lines is painted. */
+export type ContourFill = "bands" | "gradient" | "none";
 
 /** Line configuration for {@link ContourRenderOptions}. */
 export interface ContourLineOptions {
@@ -116,11 +137,21 @@ export interface ContourRenderOptions {
   thresholds: readonly number[];
   /** Band to contour. @default 0 */
   band?: number;
-  /** Filled bands. Omit or pass `false` for lines only. */
-  bands?: ContourBandOptions | false;
   /**
-   * Contour lines, on by default; pass `false` for bands only. Disabling
-   * both is a configuration error.
+   * How the area between lines is painted. `"bands"` classifies the value
+   * against the thresholds and fills each band with one colour. `"gradient"`
+   * is the raw-raster rendering: `bands.colors` runs continuously from the
+   * first threshold to the last, ignoring the thresholds in between, which
+   * therefore needs at least two thresholds. `"none"` leaves a transparent
+   * base for lines only. Turning off both the fill and the lines is a
+   * configuration error.
+   * @default "bands"
+   */
+  fill?: ContourFill;
+  /** Fill colours; required unless `fill` is `"none"`. */
+  bands?: ContourBandOptions;
+  /**
+   * Contour lines, on by default; pass `false` for the fill only.
    * @default { width: 1 }
    */
   lines?: ContourLineOptions | false;
@@ -131,11 +162,11 @@ export interface ContourBandWithColor extends ContourBand {
   color: string;
 }
 
-/** The band model with colours, or `[]` when bands are off. */
+/** The band model with colours, or `[]` unless the fill is `"bands"`. */
 export function resolveContourBands(
   contour: ContourRenderOptions,
 ): ContourBandWithColor[] {
-  if (!contour.bands) {
+  if ((contour.fill ?? "bands") !== "bands" || !contour.bands) {
     return [];
   }
   const model = bandsFromThresholds(contour.thresholds, contour.bands);
@@ -143,14 +174,27 @@ export function resolveContourBands(
   return model.map((band, k) => ({ ...band, color: colors[k]! }));
 }
 
+/** The `"gradient"` fill's domain and colour stops, for legends. */
+export interface ContourGradient {
+  /** The first threshold. */
+  min: number;
+  /** The last threshold. */
+  max: number;
+  /** CSS colours, evenly spaced from `min` to `max`. */
+  stops: string[];
+}
+
 /** Everything derived from {@link ContourRenderOptions} that needs no GL. */
 export interface ResolvedContourOptions {
   band: number;
+  fill: ContourFill;
   thresholds: PackedThresholds;
-  /** With colours; `[]` when bands are off. */
+  /** With colours; `[]` unless the fill is `"bands"`. */
   bands: ContourBandWithColor[];
-  /** Colour lookup row, `null` when bands are off. */
+  /** Colour lookup row, `null` unless the fill is `"bands"`. */
   bandImage: BandColorImage | null;
+  /** Domain, stops and ramp image, `null` unless the fill is `"gradient"`. */
+  gradient: (ContourGradient & { image: BandColorImage }) | null;
   includeLower: boolean;
   includeUpper: boolean;
   /** Line props minus nothing GL-specific; `null` when lines are off. */
@@ -158,6 +202,7 @@ export interface ResolvedContourOptions {
 }
 
 const DEFAULT_LINE_COLOR = "#333333";
+const FILLS: readonly ContourFill[] = ["bands", "gradient", "none"];
 
 /**
  * Resolve and validate a contour configuration in one pass: thresholds are
@@ -181,13 +226,24 @@ export function resolveContourOptions(
       `band ${band} is out of range for a ${samplesPerPixel}-band raster`,
     );
   }
-  if (contour.bands === false && contour.lines === false) {
-    throw new RangeError("contour needs bands, lines or both");
+  const fill = contour.fill ?? "bands";
+  if (!FILLS.includes(fill)) {
+    throw new RangeError(
+      `fill must be one of ${FILLS.map((f) => `"${f}"`).join(", ")}, got ${JSON.stringify(fill)}`,
+    );
+  }
+  if (fill !== "none" && !contour.bands) {
+    throw new RangeError(
+      `fill "${fill}" needs \`bands\` with colours; use fill: "none" for lines only`,
+    );
+  }
+  if (fill === "none" && contour.lines === false) {
+    throw new RangeError("contour needs a fill, lines or both");
   }
 
   const bands = resolveContourBands(contour);
   let bandImage: BandColorImage | null = null;
-  if (contour.bands) {
+  if (fill === "bands") {
     if (bands.length === 0) {
       throw new RangeError(
         "the thresholds and includeLower/includeUpper settings emit no band",
@@ -195,6 +251,23 @@ export function resolveContourOptions(
     }
     // Parses every colour, so an unparsable one fails here.
     bandImage = bandColorImage(bands.map((b) => b.color));
+  }
+
+  let gradient: ResolvedContourOptions["gradient"] = null;
+  if (fill === "gradient") {
+    if (contour.thresholds.length < 2) {
+      throw new RangeError(
+        "a gradient fill runs from the first threshold to the last, so it needs at least two",
+      );
+    }
+    const stops = resolveGradientStops(contour.bands!.colors);
+    gradient = {
+      min: contour.thresholds[0]!,
+      max: contour.thresholds[contour.thresholds.length - 1]!,
+      stops,
+      // Parses every stop, so an unparsable one fails here.
+      image: gradientColorImage(stops),
+    };
   }
 
   let lines: ResolvedContourOptions["lines"] = null;
@@ -222,11 +295,13 @@ export function resolveContourOptions(
 
   return {
     band,
+    fill,
     thresholds,
     bands,
     bandImage,
-    includeLower: contour.bands ? (contour.bands.includeLower ?? false) : false,
-    includeUpper: contour.bands ? (contour.bands.includeUpper ?? true) : true,
+    gradient,
+    includeLower: contour.bands?.includeLower ?? false,
+    includeUpper: contour.bands?.includeUpper ?? true,
     lines,
   };
 }
@@ -262,10 +337,11 @@ export interface GeoTiffRenderer {
   /** Release layer-wide resources such as the colormap texture. */
   destroy(gl: WebGL2RenderingContext): void;
   /**
-   * Re-style contours in place, for every tile already built. Only the
-   * contour renderer has this; see `COGLayer.setContour` for what a change
-   * may and may not touch. Takes options already run through
-   * {@link resolveContourOptions} so the caller validates exactly once.
+   * Re-style contours in place, for every tile already built: any change
+   * except the `band` to read, including switching the fill mode or lines
+   * on and off. Only the contour renderer has this. Takes options already
+   * run through {@link resolveContourOptions} so the caller validates
+   * exactly once.
    */
   updateContour?(
     gl: WebGL2RenderingContext,
@@ -593,8 +669,9 @@ function destroyTileTextures(
 }
 
 /**
- * Contour renderer: `ValueTexture` seed → `Isoband` or `ClearColor` →
- * `ContourLine`, over any sample format the texture table knows.
+ * Contour renderer: `ValueTexture` seed → `Isoband`, `ValueGradient` or
+ * `ClearColor` → `ContourLine`, over any sample format the texture table
+ * knows.
  */
 function createContourRenderer(
   geotiff: GeoTIFF,
@@ -607,7 +684,7 @@ function createContourRenderer(
   // runs per tile and `getUniforms` per tile per frame, so no colour parsing
   // or array allocation may live there.
   const resolved = resolveContourOptions(contour, samplesPerPixel);
-  const { band, thresholds } = resolved;
+  const { band } = resolved;
 
   const uploadedSamples = samplesPerPixel === 3 ? 4 : samplesPerPixel;
   const textureFormat = inferTextureFormat(
@@ -626,9 +703,10 @@ function createContourRenderer(
   const offset = geotiff.offsets[band] ?? 0;
   const nodataSampled = nodata === null ? null : nodata / denorm;
 
-  const bandColorTexture = (
+  const colorTexture = (
     glContext: WebGL2RenderingContext,
     image: BandColorImage,
+    linear: boolean,
   ): WebGLTexture =>
     createTexture2D(glContext, {
       width: image.width,
@@ -640,73 +718,95 @@ function createContourRenderer(
         [8, 8, 8, 8],
         [SampleFormat.Uint],
       ),
-      linear: false,
+      linear,
     });
 
-  // These two objects are shared by reference with every tile's pipeline,
-  // which is what lets `updateContour` re-style tiles that are already built:
-  // mutate them, and the next `getUniforms` pass sees the new values.
-  let isobandProps: IsobandProps | undefined;
-  if (resolved.bandImage) {
-    isobandProps = {
-      thresholds,
-      includeLower: resolved.includeLower,
-      includeUpper: resolved.includeUpper,
-      colors: {
-        texture: bandColorTexture(gl, resolved.bandImage),
-        target: gl.TEXTURE_2D,
-      },
-    };
+  /**
+   * The modules after the seed and mask, with their props. One instance is
+   * shared by reference with every tile's pipeline, so `getUniforms` reads
+   * precomputed objects and a re-style is a rebuild of this one object.
+   */
+  interface ContourStyle {
+    fill:
+      | { module: typeof Isoband; props: IsobandProps }
+      | { module: typeof ValueGradient; props: ValueGradientProps }
+      | { module: typeof ClearColor; props?: undefined };
+    lines?: ContourLineProps;
   }
-  const lineProps: ContourLineProps | undefined = resolved.lines
-    ? { thresholds, ...resolved.lines }
-    : undefined;
 
-  const updateContour = (
+  const createStyle = (
     glContext: WebGL2RenderingContext,
-    next: ResolvedContourOptions,
+    options: ResolvedContourOptions,
+  ): ContourStyle => {
+    // The declared mode is the one discriminant; the images are its
+    // payload and `resolveContourOptions` guarantees each is present for
+    // its own mode.
+    let fill: ContourStyle["fill"];
+    switch (options.fill) {
+      case "bands":
+        fill = {
+          module: Isoband,
+          props: {
+            thresholds: options.thresholds,
+            includeLower: options.includeLower,
+            includeUpper: options.includeUpper,
+            // One texel per band: NEAREST, so a band never bleeds into the next.
+            colors: {
+              texture: colorTexture(glContext, options.bandImage!, false),
+              target: glContext.TEXTURE_2D,
+            },
+          },
+        };
+        break;
+      case "gradient":
+        fill = {
+          module: ValueGradient,
+          props: {
+            min: options.gradient!.min,
+            max: options.gradient!.max,
+            includeLower: options.includeLower,
+            includeUpper: options.includeUpper,
+            // A ramp: LINEAR, so the shader interpolates between samples.
+            colors: {
+              texture: colorTexture(glContext, options.gradient!.image, true),
+              target: glContext.TEXTURE_2D,
+            },
+          },
+        };
+        break;
+      case "none":
+        fill = { module: ClearColor };
+        break;
+      default:
+        throw new RangeError(
+          `unknown contour fill ${JSON.stringify(options.fill satisfies never)}`,
+        );
+    }
+    return {
+      fill,
+      lines: options.lines
+        ? { thresholds: options.thresholds, ...options.lines }
+        : undefined,
+    };
+  };
+
+  const destroyStyle = (
+    glContext: WebGL2RenderingContext,
+    style: ContourStyle,
   ): void => {
-    // The seed props (band index) are copied into each tile at build time and
-    // the module chain is fixed per compiled program, so neither can follow a
-    // change here. Refuse rather than leave old tiles styled differently.
-    if (next.band !== band) {
-      throw new RangeError(
-        `setContour cannot change the band (${band} → ${next.band}); recreate the layer`,
-      );
-    }
-    if ((next.bandImage !== null) !== (isobandProps !== undefined)) {
-      throw new RangeError(
-        "setContour cannot switch bands on or off; recreate the layer",
-      );
-    }
-    if ((next.lines !== null) !== (lineProps !== undefined)) {
-      throw new RangeError(
-        "setContour cannot switch lines on or off; recreate the layer",
-      );
-    }
-    if (isobandProps && next.bandImage) {
-      // The lookup row is one texel per band, so its width changes with the
-      // band count: replace the texture rather than re-upload into it. Create
-      // the new one first — if that fails the tiles keep a live texture and
-      // consistent (old) thresholds instead of sampling a deleted one.
-      const texture = bandColorTexture(glContext, next.bandImage);
-      glContext.deleteTexture(isobandProps.colors.texture);
-      isobandProps.colors = { texture, target: glContext.TEXTURE_2D };
-      isobandProps.thresholds = next.thresholds;
-      isobandProps.includeLower = next.includeLower;
-      isobandProps.includeUpper = next.includeUpper;
-    }
-    if (lineProps && next.lines) {
-      Object.assign(lineProps, next.lines, { thresholds: next.thresholds });
+    if (style.fill.props) {
+      glContext.deleteTexture(style.fill.props.colors.texture);
     }
   };
 
-  // Contours interpolate `value` manually, so each tile carries a halo of
-  // neighbour texels: without it the outer half texel clamps to the tile's
-  // own edge and every isoline breaks into a step at the seam.
-  const haloCache = new DecodedTileCache();
+  let style = createStyle(gl, resolved);
 
-  const buildPipeline = (textures: GeoTiffTileTextures): RenderPipeline => {
+  // Every pipeline handed out and not yet destroyed, by its tile's textures,
+  // so a re-style can rebuild the module chain of tiles already built. The
+  // program cache compiles any new chain on demand.
+  const live = new Map<GeoTiffTileTextures, RenderPipeline>();
+
+  const modulesFor = (textures: GeoTiffTileTextures): RenderPipeline => {
     const pipeline: RenderPipeline = [
       {
         module: seed,
@@ -727,16 +827,46 @@ function createContourRenderer(
         props: { mask: { texture: textures.mask, target: gl.TEXTURE_2D } },
       });
     }
-    if (isobandProps) {
-      pipeline.push({ module: Isoband, props: isobandProps });
-    } else {
-      pipeline.push({ module: ClearColor });
-    }
-    if (lineProps) {
-      pipeline.push({ module: ContourLine, props: lineProps });
+    pipeline.push(style.fill);
+    if (style.lines) {
+      pipeline.push({ module: ContourLine, props: style.lines });
     }
     return pipeline;
   };
+
+  const buildPipeline = (textures: GeoTiffTileTextures): RenderPipeline => {
+    const pipeline = modulesFor(textures);
+    live.set(textures, pipeline);
+    return pipeline;
+  };
+
+  const updateContour = (
+    glContext: WebGL2RenderingContext,
+    next: ResolvedContourOptions,
+  ): void => {
+    // The seed's band index is what selects the texture channel; a change
+    // would need every tile's props rewritten and, for a multi-band raster,
+    // says the caller wants a different layer. Refuse rather than guess.
+    if (next.band !== band) {
+      throw new RangeError(
+        `setContour cannot change the band (${band} → ${next.band}); recreate the layer`,
+      );
+    }
+    // Create the new textures before deleting the old: if that fails the
+    // tiles keep a live texture and consistent (old) props.
+    const nextStyle = createStyle(glContext, next);
+    destroyStyle(glContext, style);
+    style = nextStyle;
+    // In place, since each array is the one its tile's payload holds.
+    for (const [textures, pipeline] of live) {
+      pipeline.splice(0, pipeline.length, ...modulesFor(textures));
+    }
+  };
+
+  // Contours interpolate `value` manually, so each tile carries a halo of
+  // neighbour texels: without it the outer half texel clamps to the tile's
+  // own edge and every isoline breaks into a step at the seam.
+  const haloCache = new DecodedTileCache();
 
   return {
     // Filtering is irrelevant: the seed interpolates with texelFetch.
@@ -747,12 +877,14 @@ function createContourRenderer(
       haloCache,
     }),
     buildPipeline,
-    destroyTileTextures,
+    destroyTileTextures: (glContext, textures) => {
+      live.delete(textures);
+      destroyTileTextures(glContext, textures);
+    },
     destroy: (glContext) => {
       haloCache.clear();
-      if (isobandProps) {
-        glContext.deleteTexture(isobandProps.colors.texture);
-      }
+      live.clear();
+      destroyStyle(glContext, style);
     },
     updateContour,
   };

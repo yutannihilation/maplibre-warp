@@ -95,8 +95,8 @@ and one program is compiled per distinct module chain.
 
 ### Contours in the shader
 
-With the `contour` option the layer draws a DEM as filled bands and/or lines
-instead of imagery, entirely in the fragment shader:
+With the `contour` option the layer draws a DEM as filled bands, a continuous
+gradient or lines only — instead of imagery, entirely in the fragment shader:
 
 ```ts
 import { interpolateViridis, schemeBlues } from "d3-scale-chromatic";
@@ -106,8 +106,10 @@ import { interpolateViridis, schemeBlues } from "d3-scale-chromatic";
 const layer = new COGLayer({
   id: "dem",
   geotiff: "https://example.com/dem.tif",
+  opacity: 0.8,
   contour: {
     thresholds: [200, 400, 600, 800],
+    fill: "bands", // the default
     bands: { colors: interpolateViridis },
     lines: { width: 1, color: "#333", majorEvery: 5, majorWidth: 2 },
   },
@@ -118,13 +120,27 @@ layer.getBands(); // [{ band, min, max, color }, …] for a legend
 bands: { colors: schemeBlues[5] }
 
 // Re-style in place — no reload, tiles on the GPU repaint with the new
-// thresholds and colours. Switching bands/lines on or off, or changing
-// `band`, needs a new layer and throws a RangeError instead.
+// options on the next frame. Everything but `band` can change, including
+// the fill mode and lines on or off; a new module chain is compiled on
+// demand.
 layer.setContour({
   thresholds: [100, 300, 500, 700, 900],
   bands: { colors: interpolateViridis },
   lines: { width: 1 },
 });
+
+// The raw-raster view: the same colours run continuously from the first
+// threshold to the last (the ones in between only matter to the lines).
+layer.setContour({
+  thresholds: [100, 300, 500, 700, 900],
+  fill: "gradient",
+  bands: { colors: interpolateViridis, includeLower: true },
+});
+layer.getGradient(); // { min, max, stops } for a ramp legend
+
+// Lines only, and opacity — also live, also without a reload.
+layer.setContour({ thresholds: [100, 300, 500, 700, 900], fill: "none" });
+layer.setOpacity(0.5);
 ```
 
 The value is read with an exactly typed sampler (`sampler2D`, `usampler2D`
@@ -132,9 +148,9 @@ or `isampler2D`), so int16, uint16 and float32 rasters work here, and
 interpolated bilinearly in the shader with `texelFetch` — integer textures
 cannot be LINEAR-filtered, and this also keeps nodata exact. Bands classify
 the value against up to 64 thresholds and look their colour up in a small
-texture; lines measure the distance to the nearest threshold in screen
-pixels via `fwidth`, so they keep a constant width at every zoom and under
-globe. Colours are hex or `rgb()`/`rgba()` strings, and every contour option
+texture; the gradient maps the value onto a 256-texel ramp instead; lines
+measure the distance to the nearest threshold in screen pixels via `fwidth`,
+so they keep a constant width at every zoom and under globe. Colours are hex or `rgb()`/`rgba()` strings, and every contour option
 is validated in the `COGLayer` constructor so a misconfiguration fails before
 any network request. Output is raster: no labels and no picking. See
 `docs/adr/0003-shader-contours.md`.

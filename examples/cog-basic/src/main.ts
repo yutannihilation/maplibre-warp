@@ -2,14 +2,14 @@ import { COGLayer } from "@yutannihilation/maplibre-warp-geotiff";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
+import type { ContourFill } from "@yutannihilation/maplibre-warp-geotiff";
 import type { LayerSpecification, ProjectionSpecification } from "maplibre-gl";
 // maplibre-gl v6 resolves its worker through a dynamic `new URL()`, which no
 // bundler can statically analyse, so the worker chunk is never emitted and the
 // production build 404s on it. Bundle it explicitly and hand over the URL, as
 // MapLibre's own Vite guidance prescribes.
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
-
-import type { Dataset, SchemeId } from "./datasets.js";
+import type { ContourStyle, Dataset, SchemeId } from "./datasets.js";
 import {
   contourOptions,
   DATASETS,
@@ -29,9 +29,16 @@ const projectionEl = document.getElementById("projection") as HTMLSelectElement;
 const contourControlsEl = document.getElementById(
   "contour-controls",
 ) as HTMLFieldSetElement;
+const fillEl = document.getElementById("fill") as HTMLSelectElement;
+const linesEl = document.getElementById("lines") as HTMLInputElement;
 const schemeEl = document.getElementById("scheme") as HTMLSelectElement;
 const binsEl = document.getElementById("bins") as HTMLInputElement;
 const binsValueEl = document.getElementById("bins-value") as HTMLOutputElement;
+const opacityEl = document.getElementById("opacity") as HTMLInputElement;
+const opacityValueEl = document.getElementById(
+  "opacity-value",
+) as HTMLOutputElement;
+opacityValueEl.value = opacityEl.value;
 
 for (const dataset of DATASETS) {
   const option = document.createElement("option");
@@ -74,14 +81,35 @@ let currentDataset: Dataset | undefined;
 /** Once the user has picked a scheme it carries across datasets. */
 let schemeChosen = false;
 
+/**
+ * Keep the controls describing a valid configuration: the layer rejects
+ * "no fill and no lines", so while the fill is "none" the lines are forced
+ * on and the checkbox is locked. Run whenever either control or the dataset
+ * changes, before the options are built.
+ */
+function constrainContourControls(): void {
+  const linesOnly = fillEl.value === "none";
+  if (linesOnly) {
+    linesEl.checked = true;
+  }
+  linesEl.disabled = linesOnly;
+}
+
+/** The contour controls' current state. */
+function styleFromControls(): ContourStyle {
+  constrainContourControls();
+  return {
+    scheme: schemeEl.value as SchemeId,
+    bins: Number(binsEl.value),
+    fill: fillEl.value as ContourFill,
+    lines: linesEl.checked,
+  };
+}
+
 /** The contour options the controls currently describe, for `dataset`. */
 function contourFromControls(dataset: Dataset) {
   return dataset.contour
-    ? contourOptions(
-        dataset.contour,
-        schemeEl.value as SchemeId,
-        Number(binsEl.value),
-      )
+    ? contourOptions(dataset.contour, styleFromControls())
     : undefined;
 }
 
@@ -91,12 +119,14 @@ function showDataset(dataset: Dataset): void {
   }
   currentDataset = dataset;
 
-  // A new dataset brings its own bin count and, until the user picks one, its
-  // own scheme. Imagery datasets have nothing to control.
+  // A new dataset brings its own bin count and line default and, until the
+  // user picks one, its own scheme; the fill mode is the user's and carries
+  // across. Imagery datasets have nothing to control.
   contourControlsEl.hidden = !dataset.contour;
   if (dataset.contour) {
     binsEl.value = String(dataset.contour.bins);
     binsValueEl.value = binsEl.value;
+    linesEl.checked = dataset.contour.lines !== false;
     if (!schemeChosen) {
       schemeEl.value = dataset.contour.scheme;
     }
@@ -108,6 +138,7 @@ function showDataset(dataset: Dataset): void {
   current = new COGLayer({
     id: LAYER_ID,
     geotiff: dataset.url,
+    opacity: Number(opacityEl.value),
     contour: contourFromControls(dataset),
     onGeoTIFFLoad: (geotiff, { projection, geographicBounds }) => {
       const headerMs = Math.round(performance.now() - started);
@@ -133,9 +164,11 @@ function showDataset(dataset: Dataset): void {
 }
 
 /**
- * Apply the scheme and bin controls to the layer that is already on the map.
- * `setContour` re-styles the tiles on the GPU without reloading anything, so
- * this runs live while the slider is dragged.
+ * Apply the contour controls to the layer that is already on the map.
+ * `setContour` re-styles the tiles on the GPU without reloading anything —
+ * including switching between bands, gradient and lines-only, which
+ * compiles a new module chain on demand — so this runs live while the
+ * slider is dragged.
  */
 function restyleContours(): void {
   binsValueEl.value = binsEl.value;
@@ -146,12 +179,36 @@ function restyleContours(): void {
   renderLegend(current);
 }
 
+/** Opacity is a per-frame uniform, so this too is live and reload-free. */
+function applyOpacity(): void {
+  opacityValueEl.value = opacityEl.value;
+  current?.setOpacity(Number(opacityEl.value));
+}
+
 // Evenly split domains rarely land on round numbers; one decimal is plenty.
 const legendNumber = new Intl.NumberFormat("en", { maximumFractionDigits: 1 });
 
-/** Legend from the layer's band model: a swatch and a range per band. */
+/**
+ * Legend from the layer's own model: a swatch and a range per band, or a
+ * ramp with its end values for a gradient. Empty for lines only.
+ */
 function renderLegend(layer: COGLayer): void {
   const fmt = (v: number) => legendNumber.format(v);
+  const gradient = layer.getGradient();
+  if (gradient) {
+    const ramp = document.createElement("div");
+    ramp.className = "ramp";
+    ramp.style.background = `linear-gradient(to right, ${gradient.stops.join(", ")})`;
+    const labels = document.createElement("div");
+    labels.className = "ramp-labels";
+    for (const v of [gradient.min, gradient.max]) {
+      const span = document.createElement("span");
+      span.textContent = fmt(v);
+      labels.append(span);
+    }
+    legendEl.replaceChildren(ramp, labels);
+    return;
+  }
   legendEl.replaceChildren(
     ...layer.getBands().flatMap((band) => {
       const swatch = document.createElement("i");
@@ -224,6 +281,9 @@ schemeEl.addEventListener("change", () => {
   restyleContours();
 });
 binsEl.addEventListener("input", restyleContours);
+fillEl.addEventListener("change", restyleContours);
+linesEl.addEventListener("change", restyleContours);
+opacityEl.addEventListener("input", applyOpacity);
 
 // Surface WebGL errors in the example rather than letting them scroll past.
 map.on("error", (event: { error: unknown }) => {

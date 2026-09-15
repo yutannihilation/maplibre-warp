@@ -45,15 +45,23 @@
         padding: 0 4px;
         font-weight: 600;
       }
-      #contour-controls output {
+      #panel input[type="range"] {
+        display: block;
+        width: 100%;
+        margin: 0 0 8px;
+      }
+      #panel output {
         float: right;
         font-weight: 400;
         font-variant-numeric: tabular-nums;
       }
-      #contour-controls input[type="range"] {
-        display: block;
-        width: 100%;
+      #contour-controls label.check {
+        font-weight: 400;
         margin: 0 0 8px;
+      }
+      #contour-controls label.check input {
+        margin: 0 6px 0 0;
+        vertical-align: -1px;
       }
       #status {
         margin-top: 8px;
@@ -78,6 +86,17 @@
         height: 14px;
         border: 1px solid rgba(0, 0, 0, 0.2);
       }
+      #legend .ramp {
+        grid-column: 1 / -1;
+        height: 14px;
+        border: 1px solid rgba(0, 0, 0, 0.2);
+      }
+      #legend .ramp-labels {
+        grid-column: 1 / -1;
+        display: flex;
+        justify-content: space-between;
+        font-variant-numeric: tabular-nums;
+      }
     </style>
   </head>
   <body>
@@ -91,8 +110,17 @@
         <option value="globe">globe (mercator above z12)</option>
         <option value="vertical-perspective">vertical-perspective</option>
       </select>
+      <label for="opacity">Opacity <output for="opacity" id="opacity-value"></output></label>
+      <input id="opacity" type="range" min="0" max="1" step="0.05" value="1" />
       <fieldset id="contour-controls" hidden>
         <legend>Contours</legend>
+        <label for="fill">Fill</label>
+        <select id="fill">
+          <option value="bands">filled bands</option>
+          <option value="gradient">raw raster (gradient)</option>
+          <option value="none">none</option>
+        </select>
+        <label class="check"><input id="lines" type="checkbox" checked />Contour lines</label>
         <label for="scheme">Colour scheme</label>
         <select id="scheme"></select>
         <label for="bins">Bins <output for="bins" id="bins-value"></output></label>

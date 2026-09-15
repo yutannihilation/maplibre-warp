@@ -1,7 +1,8 @@
 /**
- * Contour shader modules: a scalar seed, filled bands, lines.
+ * Contour shader modules: a scalar seed, filled bands, a continuous gradient,
+ * lines.
  *
- * All three work on the `value`/`valid` variables `buildFragmentSource`
+ * All of them work on the `value`/`valid` variables `buildFragmentSource`
  * declares in `main()`, so bands can recolour `color` while lines still see
  * the underlying sample.
  */
@@ -290,7 +291,67 @@ uniform vec4 u_major_color;`,
   }),
 };
 
-/** A transparent base, for lines without bands. */
+export interface ValueGradientProps {
+  /** `value` painted with the ramp's first colour. */
+  min: number;
+  /** `value` painted with the ramp's last colour; must exceed `min`. */
+  max: number;
+  /**
+   * Paint values below `min` with the first colour rather than leaving them
+   * transparent — the gradient's reading of the open lower band.
+   */
+  includeLower: boolean;
+  /** Paint values at or above `max` with the last colour. */
+  includeUpper: boolean;
+  /** `n × 1` RGBA8 ramp, LINEAR, CLAMP_TO_EDGE. */
+  colors: TextureBinding;
+}
+
+/**
+ * Continuous colour ramp over `value` — the "raw raster" rendering of a
+ * scalar band. Maps `[min, max]` onto the ramp texture, clamped at the ends;
+ * outside that range the pixel is painted with the end colour or left
+ * transparent according to `includeLower`/`includeUpper`, mirroring
+ * {@link Isoband}'s open bands so a following {@link ContourLine} still
+ * draws there. Never discards, for the same `fwidth` reason as `Isoband`.
+ */
+export const ValueGradient: RasterShaderModule<ValueGradientProps> = {
+  name: "value-gradient",
+  fsDecl: `uniform float u_gradient_min;
+uniform float u_gradient_max;
+uniform int u_gradient_include_lower;
+uniform int u_gradient_include_upper;
+uniform sampler2D u_gradient_colors;`,
+  fsColor: `  if (valid == 0.0 ||
+      (value < u_gradient_min && u_gradient_include_lower == 0) ||
+      (value >= u_gradient_max && u_gradient_include_upper == 0)) {
+    color = vec4(0.0);
+  } else {
+    float t = clamp((value - u_gradient_min) / (u_gradient_max - u_gradient_min), 0.0, 1.0);
+    color = texture(u_gradient_colors, vec2(t, 0.5));
+  }`,
+  getUniforms: (props) => {
+    if (!(Number.isFinite(props.min) && Number.isFinite(props.max))) {
+      throw new RangeError("gradient min and max must be finite");
+    }
+    if (props.max <= props.min) {
+      throw new RangeError(
+        `gradient max must exceed min, got [${props.min}, ${props.max}]`,
+      );
+    }
+    return {
+      textures: { u_gradient_colors: props.colors },
+      uniforms: {
+        u_gradient_min: props.min,
+        u_gradient_max: props.max,
+        u_gradient_include_lower: props.includeLower ? 1 : 0,
+        u_gradient_include_upper: props.includeUpper ? 1 : 0,
+      },
+    };
+  },
+};
+
+/** A transparent base, for lines without a fill. */
 export const ClearColor: RasterShaderModule = {
   name: "clear-color",
   fsColor: "  color = vec4(0.0);",

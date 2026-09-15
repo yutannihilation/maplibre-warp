@@ -8,6 +8,8 @@ export { addAlphaChannel, fetchGeoTIFF, toGlView } from "./geotiff-utils.js";
 export type {
   ContourBandOptions,
   ContourBandWithColor,
+  ContourFill,
+  ContourGradient,
   ContourLineOptions,
   ContourRenderOptions,
   GeoTiffRenderer,
