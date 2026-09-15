@@ -1,4 +1,48 @@
 import type { ContourRenderOptions } from "@yutannihilation/maplibre-warp-geotiff";
+import { MAX_THRESHOLDS } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
+import {
+  interpolateCividis,
+  interpolateInferno,
+  interpolateMagma,
+  interpolatePlasma,
+  interpolateSpectral,
+  interpolateTurbo,
+  interpolateViridis,
+  interpolateYlGnBu,
+} from "d3-scale-chromatic";
+
+/**
+ * Band colours come from d3-scale-chromatic. `bands.colors` accepts either a
+ * continuous interpolator — called once per band with `t` in [0, 1] (plus the
+ * band index and count) — or a discrete scheme, an array whose length must
+ * equal the band count (`schemeBlues[5]` for five bands, say). The picker
+ * below sticks to interpolators so that any bin count works.
+ */
+export const SCHEMES = {
+  viridis: interpolateViridis,
+  inferno: interpolateInferno,
+  magma: interpolateMagma,
+  plasma: interpolatePlasma,
+  cividis: interpolateCividis,
+  turbo: interpolateTurbo,
+  spectral: interpolateSpectral,
+  YlGnBu: interpolateYlGnBu,
+} as const;
+
+export type SchemeId = keyof typeof SCHEMES;
+
+/** How a dataset is contoured; the UI supplies the scheme and may override `bins`. */
+export interface ContourSpec {
+  /** First and last threshold, in the raster's units. */
+  domain: [min: number, max: number];
+  /** Band count when the dataset is selected. */
+  bins: number;
+  /** Also fill the open band below `domain[0]`. */
+  includeLower?: boolean;
+  /** Default d3 scheme; the UI may pick another. */
+  scheme: SchemeId;
+  lines: ContourRenderOptions["lines"];
+}
 
 export interface Dataset {
   id: string;
@@ -10,35 +54,53 @@ export interface Dataset {
   /** What this dataset is meant to exercise. */
   note: string;
   /** Render as shader contours instead of imagery. */
-  contour?: ContourRenderOptions;
+  contour?: ContourSpec;
 }
 
-/** `from`, `from + step`, … up to and including `to`. */
-export function range(from: number, to: number, step: number): number[] {
-  const out: number[] = [];
-  for (let v = from; v <= to + 1e-9; v += step) {
-    out.push(Number(v.toFixed(6)));
+/** Fewest bands the UI offers: one threshold plus the open upper band. */
+export const MIN_BINS = 2;
+/**
+ * Most bands the UI offers. Without `includeLower` every band needs its own
+ * threshold, so this is the layer's threshold cap; the range input's bounds
+ * are set from here rather than in the HTML.
+ */
+export const MAX_BINS = MAX_THRESHOLDS;
+
+/** `count` evenly spaced values from `from` to `to`, both included. */
+export function linspace(from: number, to: number, count: number): number[] {
+  if (count === 1) {
+    return [from];
   }
-  return out;
+  const step = (to - from) / (count - 1);
+  return Array.from({ length: count }, (_, i) =>
+    Number((from + i * step).toFixed(6)),
+  );
 }
 
-/** A simple hypsometric ramp: green lowlands through brown to white peaks. */
-export function hypsometric(t: number): string {
-  const stops: Array<[number, number, number]> = [
-    [86, 139, 84],
-    [178, 190, 106],
-    [232, 214, 158],
-    [186, 130, 84],
-    [130, 92, 74],
-    [240, 240, 240],
-  ];
-  const x = t * (stops.length - 1);
-  const i = Math.min(Math.floor(x), stops.length - 2);
-  const f = x - i;
-  const a = stops[i]!;
-  const b = stops[i + 1]!;
-  const c = a.map((v, ch) => Math.round(v + (b[ch]! - v) * f));
-  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+/**
+ * Turn a spec into layer options. `bins` is the number of filled bands, so the
+ * threshold count is one fewer when the open lower band is on. Pure: this is
+ * what the UI re-runs on every scheme or bin change.
+ */
+export function contourOptions(
+  spec: ContourSpec,
+  scheme: SchemeId,
+  bins: number,
+): ContourRenderOptions {
+  if (!Number.isInteger(bins) || bins < MIN_BINS || bins > MAX_BINS) {
+    throw new RangeError(`bins must be an integer in ${MIN_BINS}–${MAX_BINS}`);
+  }
+  const includeLower = spec.includeLower ?? false;
+  const thresholds = linspace(
+    spec.domain[0],
+    spec.domain[1],
+    bins - (includeLower ? 1 : 0),
+  );
+  return {
+    thresholds,
+    bands: { colors: SCHEMES[scheme], includeLower },
+    lines: spec.lines,
+  };
 }
 
 export const DATASETS: Dataset[] = [
@@ -74,8 +136,10 @@ export const DATASETS: Dataset[] = [
     zoom: 14,
     note: "2 m DEM in LV95; bands every 50 m and lines drawn in the fragment shader.",
     contour: {
-      thresholds: range(600, 2600, 50),
-      bands: { colors: hypsometric },
+      // 600–2600 m in 41 bands is a threshold every 50 m.
+      domain: [600, 2600],
+      bins: 41,
+      scheme: "viridis",
       lines: {
         width: 1,
         color: "rgba(60, 40, 20, 0.8)",
@@ -92,8 +156,11 @@ export const DATASETS: Dataset[] = [
     zoom: 10,
     note: "30 m DEM in geographic coordinates (Mount Rainier); bands every 200 m.",
     contour: {
-      thresholds: range(200, 4400, 200),
-      bands: { colors: hypsometric, includeLower: true },
+      // 22 thresholds every 200 m plus the open band below 200 m.
+      domain: [200, 4400],
+      bins: 23,
+      includeLower: true,
+      scheme: "turbo",
       lines: {
         width: 0.8,
         color: "rgba(60, 40, 20, 0.7)",
@@ -110,12 +177,10 @@ export const DATASETS: Dataset[] = [
     zoom: 9,
     note: "Red-band reflectance as isobands: exercises the uint16 (usampler2D) contour path.",
     contour: {
-      thresholds: range(500, 5000, 500),
-      bands: {
-        colors: (t) =>
-          `rgb(${Math.round(40 + 200 * t)}, ${Math.round(30 + 60 * t)}, ${Math.round(80 - 60 * t)})`,
-        includeLower: true,
-      },
+      domain: [1000, 4000],
+      bins: 5,
+      includeLower: true,
+      scheme: "YlGnBu",
       lines: false,
     },
   },

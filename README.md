@@ -99,16 +99,32 @@ With the `contour` option the layer draws a DEM as filled bands and/or lines
 instead of imagery, entirely in the fragment shader:
 
 ```ts
+import { interpolateViridis, schemeBlues } from "d3-scale-chromatic";
+
+// Continuous interpolator: called once per band with t in [0, 1]
+// (plus the band index and count, if you want them).
 const layer = new COGLayer({
   id: "dem",
   geotiff: "https://example.com/dem.tif",
   contour: {
     thresholds: [200, 400, 600, 800],
-    bands: { colors: (t) => interpolateTerrain(t) }, // or one colour per band
+    bands: { colors: interpolateViridis },
     lines: { width: 1, color: "#333", majorEvery: 5, majorWidth: 2 },
   },
 });
 layer.getBands(); // [{ band, min, max, color }, …] for a legend
+
+// Discrete scheme: an array whose length must equal the number of bands.
+bands: { colors: schemeBlues[5] }
+
+// Re-style in place — no reload, tiles on the GPU repaint with the new
+// thresholds and colours. Switching bands/lines on or off, or changing
+// `band`, needs a new layer and throws a RangeError instead.
+layer.setContour({
+  thresholds: [100, 300, 500, 700, 900],
+  bands: { colors: interpolateViridis },
+  lines: { width: 1 },
+});
 ```
 
 The value is read with an exactly typed sampler (`sampler2D`, `usampler2D`

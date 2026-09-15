@@ -9,8 +9,14 @@ import type { LayerSpecification, ProjectionSpecification } from "maplibre-gl";
 // MapLibre's own Vite guidance prescribes.
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
-import type { Dataset } from "./datasets.js";
-import { DATASETS } from "./datasets.js";
+import type { Dataset, SchemeId } from "./datasets.js";
+import {
+  contourOptions,
+  DATASETS,
+  MAX_BINS,
+  MIN_BINS,
+  SCHEMES,
+} from "./datasets.js";
 
 maplibregl.setWorkerUrl(workerUrl);
 
@@ -20,6 +26,12 @@ const statusEl = document.getElementById("status") as HTMLDivElement;
 const legendEl = document.getElementById("legend") as HTMLDivElement;
 const selectEl = document.getElementById("dataset") as HTMLSelectElement;
 const projectionEl = document.getElementById("projection") as HTMLSelectElement;
+const contourControlsEl = document.getElementById(
+  "contour-controls",
+) as HTMLFieldSetElement;
+const schemeEl = document.getElementById("scheme") as HTMLSelectElement;
+const binsEl = document.getElementById("bins") as HTMLInputElement;
+const binsValueEl = document.getElementById("bins-value") as HTMLOutputElement;
 
 for (const dataset of DATASETS) {
   const option = document.createElement("option");
@@ -27,6 +39,14 @@ for (const dataset of DATASETS) {
   option.textContent = dataset.label;
   selectEl.append(option);
 }
+for (const id of Object.keys(SCHEMES)) {
+  const option = document.createElement("option");
+  option.value = id;
+  option.textContent = id;
+  schemeEl.append(option);
+}
+binsEl.min = String(MIN_BINS);
+binsEl.max = String(MAX_BINS);
 
 const map = new maplibregl.Map({
   container: "map",
@@ -50,10 +70,36 @@ function firstSymbolLayerId(): string | undefined {
 }
 
 let current: COGLayer | undefined;
+let currentDataset: Dataset | undefined;
+/** Once the user has picked a scheme it carries across datasets. */
+let schemeChosen = false;
+
+/** The contour options the controls currently describe, for `dataset`. */
+function contourFromControls(dataset: Dataset) {
+  return dataset.contour
+    ? contourOptions(
+        dataset.contour,
+        schemeEl.value as SchemeId,
+        Number(binsEl.value),
+      )
+    : undefined;
+}
 
 function showDataset(dataset: Dataset): void {
   if (map.getLayer(LAYER_ID)) {
     map.removeLayer(LAYER_ID);
+  }
+  currentDataset = dataset;
+
+  // A new dataset brings its own bin count and, until the user picks one, its
+  // own scheme. Imagery datasets have nothing to control.
+  contourControlsEl.hidden = !dataset.contour;
+  if (dataset.contour) {
+    binsEl.value = String(dataset.contour.bins);
+    binsValueEl.value = binsEl.value;
+    if (!schemeChosen) {
+      schemeEl.value = dataset.contour.scheme;
+    }
   }
 
   statusEl.textContent = `${dataset.note}\nopening COG…`;
@@ -62,7 +108,7 @@ function showDataset(dataset: Dataset): void {
   current = new COGLayer({
     id: LAYER_ID,
     geotiff: dataset.url,
-    contour: dataset.contour,
+    contour: contourFromControls(dataset),
     onGeoTIFFLoad: (geotiff, { projection, geographicBounds }) => {
       const headerMs = Math.round(performance.now() - started);
       statusEl.textContent = [
@@ -86,8 +132,26 @@ function showDataset(dataset: Dataset): void {
   renderLegend(current);
 }
 
+/**
+ * Apply the scheme and bin controls to the layer that is already on the map.
+ * `setContour` re-styles the tiles on the GPU without reloading anything, so
+ * this runs live while the slider is dragged.
+ */
+function restyleContours(): void {
+  binsValueEl.value = binsEl.value;
+  if (!current || !currentDataset?.contour) {
+    return;
+  }
+  current.setContour(contourFromControls(currentDataset)!);
+  renderLegend(current);
+}
+
+// Evenly split domains rarely land on round numbers; one decimal is plenty.
+const legendNumber = new Intl.NumberFormat("en", { maximumFractionDigits: 1 });
+
 /** Legend from the layer's band model: a swatch and a range per band. */
 function renderLegend(layer: COGLayer): void {
+  const fmt = (v: number) => legendNumber.format(v);
   legendEl.replaceChildren(
     ...layer.getBands().flatMap((band) => {
       const swatch = document.createElement("i");
@@ -95,10 +159,10 @@ function renderLegend(layer: COGLayer): void {
       const label = document.createElement("span");
       label.textContent =
         band.min === undefined
-          ? `< ${band.max}`
+          ? `< ${fmt(band.max!)}`
           : band.max === undefined
-            ? `≥ ${band.min}`
-            : `${band.min} – ${band.max}`;
+            ? `≥ ${fmt(band.min)}`
+            : `${fmt(band.min)} – ${fmt(band.max)}`;
       return [swatch, label];
     }),
   );
@@ -155,6 +219,11 @@ map.on("load", () => {
 
 selectEl.addEventListener("change", showSelectedDataset);
 projectionEl.addEventListener("change", applySelectedProjection);
+schemeEl.addEventListener("change", () => {
+  schemeChosen = true;
+  restyleContours();
+});
+binsEl.addEventListener("input", restyleContours);
 
 // Surface WebGL errors in the example rather than letting them scroll past.
 map.on("error", (event: { error: unknown }) => {

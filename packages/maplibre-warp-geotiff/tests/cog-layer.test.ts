@@ -46,4 +46,38 @@ describe("COGLayer contour configuration", () => {
     ]);
     expect(new COGLayer({ id: "e", geotiff }).getBands()).toEqual([]);
   });
+
+  describe("setContour", () => {
+    const initial = {
+      thresholds: [100, 200],
+      bands: { colors: ["#000", "#fff"] },
+    };
+
+    it("replaces the options before the layer is added", () => {
+      const layer = new COGLayer({ id: "f", geotiff, contour: initial });
+      layer.setContour({
+        thresholds: [1, 2, 3],
+        bands: { colors: (t) => `rgb(${Math.round(t * 255)}, 0, 0)` },
+      });
+      expect(layer.getBands().map((b) => b.color)).toEqual([
+        "rgb(0, 0, 0)",
+        "rgb(128, 0, 0)",
+        "rgb(255, 0, 0)",
+      ]);
+    });
+
+    it("validates the new options and keeps the old ones on failure", () => {
+      const layer = new COGLayer({ id: "g", geotiff, contour: initial });
+      expect(() =>
+        layer.setContour({ thresholds: [2, 1], bands: initial.bands }),
+      ).toThrow(RangeError);
+      expect(layer.getBands()).toHaveLength(2);
+    });
+
+    it("refuses on a layer created without contour", () => {
+      const layer = new COGLayer({ id: "h", geotiff });
+      expect(() => layer.setContour(initial)).toThrow(RangeError);
+      expect(layer.getBands()).toEqual([]);
+    });
+  });
 });
