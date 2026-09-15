@@ -12,10 +12,12 @@ export type {
   ContourRenderOptions,
   GeoTiffRenderer,
   GeoTiffTileTextures,
+  ResolvedContourOptions,
 } from "./render-pipeline.js";
 export {
   inferRenderPipeline,
   resolveContourBands,
+  resolveContourOptions,
   validateContourOptions,
 } from "./render-pipeline.js";
 export type {

@@ -105,8 +105,7 @@ describe("inferRenderPipeline with contour", () => {
       nodata: -9999,
       scale: 1,
       offset: 0,
-      width: 256,
-      height: 128,
+      size: new Float32Array([256, 128]),
     });
     expect(pipeline[1]!.props).toMatchObject({
       thresholds: { count: 3 },
@@ -195,13 +194,8 @@ describe("inferRenderPipeline with contour", () => {
     ]);
   });
 
-  it("exposes the band model with colours", () => {
-    const renderer = inferRenderPipeline(
-      fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
-      stubGl(),
-      { contour },
-    );
-    expect(renderer.bands).toEqual([
+  it("exposes the band model with colours through resolveContourBands", () => {
+    expect(resolveContourBands(contour)).toEqual([
       { band: 0, min: 100, max: 200, color: "#000" },
       { band: 1, min: 200, max: 300, color: "#888" },
       { band: 2, min: 300, color: "#fff" },

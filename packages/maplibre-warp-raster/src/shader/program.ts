@@ -95,14 +95,14 @@ export class RasterProgram {
     if (size > 1) {
       switch (type) {
         case gl.FLOAT:
-          gl.uniform1fv(location, asFloat32(value));
+          gl.uniform1fv(location, asTyped(value, Float32Array));
           return;
         case gl.FLOAT_VEC4:
-          gl.uniform4fv(location, asFloat32(value));
+          gl.uniform4fv(location, asTyped(value, Float32Array));
           return;
         case gl.INT:
         case gl.BOOL:
-          gl.uniform1iv(location, asInt32(value));
+          gl.uniform1iv(location, asTyped(value, Int32Array));
           return;
         default:
           throw new Error(
@@ -245,22 +245,20 @@ function linkProgram(
   return program;
 }
 
-function asFloat32(value: UniformValue): Float32Array {
-  if (value instanceof Float32Array) {
+/** Coerce an array-valued uniform to the typed array GL expects. */
+function asTyped<T extends Float32Array | Int32Array>(
+  value: UniformValue,
+  ctor: (new (length: number) => T) & { from(values: ArrayLike<number>): T },
+): T {
+  if (value instanceof ctor) {
     return value;
   }
-  if (Array.isArray(value) || value instanceof Int32Array) {
-    return Float32Array.from(value as ArrayLike<number>);
-  }
-  throw new Error("array uniform needs an array value");
-}
-
-function asInt32(value: UniformValue): Int32Array {
-  if (value instanceof Int32Array) {
-    return value;
-  }
-  if (Array.isArray(value) || value instanceof Float32Array) {
-    return Int32Array.from(value as ArrayLike<number>);
+  if (
+    Array.isArray(value) ||
+    value instanceof Float32Array ||
+    value instanceof Int32Array
+  ) {
+    return ctor.from(value as ArrayLike<number>);
   }
   throw new Error("array uniform needs an array value");
 }

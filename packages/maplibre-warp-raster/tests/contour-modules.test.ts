@@ -39,14 +39,14 @@ describe("ValueTexture", () => {
   });
 
   it("maps props to uniforms", () => {
+    const size = new Float32Array([512, 256]);
     const bindings = ValueTexture.float.getUniforms!({
       texture,
       band: 2,
       nodata: -9999,
       scale: 0.1,
       offset: 5,
-      width: 512,
-      height: 256,
+      size,
     });
     expect(bindings.textures).toEqual({ u_value_texture: texture });
     expect(bindings.uniforms).toEqual({
@@ -55,15 +55,14 @@ describe("ValueTexture", () => {
       u_value_nodata: -9999,
       u_value_scale: 0.1,
       u_value_offset: 5,
-      u_value_size: new Float32Array([512, 256]),
+      u_value_size: size,
     });
     expect(
       ValueTexture.float.getUniforms!({
         texture,
         band: 0,
         nodata: null,
-        width: 1,
-        height: 1,
+        size: new Float32Array([1, 1]),
       }).uniforms,
     ).toMatchObject({
       u_value_has_nodata: 0,
@@ -78,8 +77,7 @@ describe("ValueTexture", () => {
         texture,
         band: 4,
         nodata: null,
-        width: 1,
-        height: 1,
+        size: new Float32Array([1, 1]),
       }),
     ).toThrow(RangeError);
   });

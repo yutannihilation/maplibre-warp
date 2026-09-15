@@ -25,9 +25,11 @@ export interface ValueTextureProps {
   scale?: number;
   /** @default 0 */
   offset?: number;
-  /** Texture size in texels, for manual bilinear interpolation. */
-  width: number;
-  height: number;
+  /**
+   * Texture size in texels as `[width, height]`, for manual bilinear
+   * interpolation. Built once per tile; `getUniforms` runs every frame.
+   */
+  size: Float32Array;
 }
 
 const SAMPLER_TYPE: Record<ValueSamplerKind, string> = {
@@ -95,7 +97,7 @@ uniform vec2 u_value_size;`,
           u_value_nodata: props.nodata ?? 0,
           u_value_scale: props.scale ?? 1,
           u_value_offset: props.offset ?? 0,
-          u_value_size: new Float32Array([props.width, props.height]),
+          u_value_size: props.size,
         },
       };
     },
