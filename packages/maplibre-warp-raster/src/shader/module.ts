@@ -53,6 +53,13 @@ export interface RasterShaderModule<PropsT = void> {
   fsDecl?: string;
 
   /**
+   * Declarations shared between modules, emitted once per `key` however many
+   * modules in the pipeline carry them (the contour modules share their
+   * threshold uniforms this way).
+   */
+  fsSharedDecl?: { key: string; glsl: string };
+
+  /**
    * GLSL inserted into `main()`, in pipeline order. Operates on the in-scope
    * `vec4 color` and `vec2 uv`. The first module in a pipeline is responsible
    * for seeding `color`.

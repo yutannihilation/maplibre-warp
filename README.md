@@ -46,11 +46,13 @@ and the data reaches the GPU unquantised.
 | `@yutannihilation/maplibre-warp-raster` | Renderer core: the custom-layer base class, tile scheduler, warp mesh, shader assembly and program cache. Source-format agnostic. |
 | `@yutannihilation/maplibre-warp-geotiff` | COG specifics: opening the file, building the tile pyramid, inferring a render pipeline from TIFF tags, texture formats. |
 
-`examples/cog-basic` is a Vite app with three datasets that exercise different
+`examples/cog-basic` is a Vite app with six datasets that exercise different
 paths: swisstopo PK1000 (EPSG:2056 oblique Mercator, RGB), NLCD land cover
-(Albers Equal Area, palette + nodata) and a Tennessee orthophoto (EPSG:2274
-State Plane in US survey feet, grayscale + nodata). A projection selector
-switches the map between mercator, globe and vertical-perspective.
+(Albers Equal Area, palette + nodata), a Tennessee orthophoto (EPSG:2274
+State Plane in US survey feet, grayscale + nodata), two float32 DEMs
+(swissALTI3D in EPSG:2056, USGS 3DEP in EPSG:4326) and a uint16 Sentinel-2
+band (EPSG:32636), the last three drawn as shader contours with a legend. A projection selector switches the map between mercator, globe
+and vertical-perspective.
 
 ```bash
 pnpm install
@@ -90,6 +92,36 @@ handful of triangles; areas where the projection curves get more.
 **Styling.** Shader modules are concatenated into one fragment shader —
 texture seed, nodata discard, mask discard, photometric conversion, colormap —
 and one program is compiled per distinct module chain.
+
+### Contours in the shader
+
+With the `contour` option the layer draws a DEM as filled bands and/or lines
+instead of imagery, entirely in the fragment shader:
+
+```ts
+const layer = new COGLayer({
+  id: "dem",
+  geotiff: "https://example.com/dem.tif",
+  contour: {
+    thresholds: [200, 400, 600, 800],
+    bands: { colors: (t) => interpolateTerrain(t) }, // or one colour per band
+    lines: { width: 1, color: "#333", majorEvery: 5, majorWidth: 2 },
+  },
+});
+layer.getBands(); // [{ band, min, max, color }, …] for a legend
+```
+
+The value is read with an exactly typed sampler (`sampler2D`, `usampler2D`
+or `isampler2D`), so int16, uint16 and float32 rasters work here, and
+interpolated bilinearly in the shader with `texelFetch` — integer textures
+cannot be LINEAR-filtered, and this also keeps nodata exact. Bands classify
+the value against up to 64 thresholds and look their colour up in a small
+texture; lines measure the distance to the nearest threshold in screen
+pixels via `fwidth`, so they keep a constant width at every zoom and under
+globe. Colours are hex or `rgb()`/`rgba()` strings, and every contour option
+is validated in the `COGLayer` constructor so a misconfiguration fails before
+any network request. Output is raster: no labels and no picking. See
+`docs/adr/0003-shader-contours.md`.
 
 ### Globe
 
@@ -160,9 +192,10 @@ loading, never per frame.
   float32 mercator and jitter from around z14 — the same limit MapLibre's own
   layers have there. The `globe` projection is unaffected: it renders flat
   mercator above z12, where the relative-to-centre path takes over.
-- **8-bit unsigned samples only.** 16/32-bit and signed/float rasters throw an
-  explicit error rather than rendering something wrong; they need the integer-
-  sampler path. The texture-format table already covers them.
+- **8-bit unsigned samples only for imagery.** 16/32-bit and signed/float
+  rasters throw an explicit error rather than rendering something wrong; they
+  need the integer-sampler path for colour output. The contour path already
+  reads them through typed samplers.
 - **No terrain draping.** MapLibre renders custom layers directly rather than
   through its render-to-texture pass, so with `map.setTerrain` active the raster
   stays flat at z = 0. Same limitation as deck.gl's interleaved mode.

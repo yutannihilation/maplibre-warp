@@ -6,10 +6,20 @@ export {
 } from "./geotiff-tileset.js";
 export { addAlphaChannel, fetchGeoTIFF, toGlView } from "./geotiff-utils.js";
 export type {
+  ContourBandOptions,
+  ContourBandWithColor,
+  ContourLineOptions,
+  ContourRenderOptions,
   GeoTiffRenderer,
   GeoTiffTileTextures,
+  ResolvedContourOptions,
 } from "./render-pipeline.js";
-export { inferRenderPipeline } from "./render-pipeline.js";
+export {
+  inferRenderPipeline,
+  resolveContourBands,
+  resolveContourOptions,
+  validateContourOptions,
+} from "./render-pipeline.js";
 export type {
   CreateTextureOptions,
   GLTextureFormat,

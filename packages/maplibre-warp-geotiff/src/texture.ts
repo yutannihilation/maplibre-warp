@@ -24,6 +24,11 @@ export interface GLTextureFormat {
   sampler: SamplerKind;
   /** Whether `LINEAR` filtering is allowed without an extension. */
   filterable: boolean;
+  /**
+   * Whether sampling yields values normalised to `[0, 1]` (the `*8` unorm
+   * formats) rather than raw texel values.
+   */
+  normalized: boolean;
   bytesPerPixel: number;
 }
 
@@ -48,20 +53,22 @@ function formatTable(
     sampler: SamplerKind,
     filterable: boolean,
     bytesPerPixel: number,
+    normalized = false,
   ): GLTextureFormat => ({
     internalFormat,
     format,
     type,
     sampler,
     filterable,
+    normalized,
     bytesPerPixel,
   });
 
   return {
     // 8-bit unsigned, normalised to [0, 1]. The M1 path.
-    "1:unorm:8": f(gl.R8, gl.RED, gl.UNSIGNED_BYTE, "float", true, 1),
-    "2:unorm:8": f(gl.RG8, gl.RG, gl.UNSIGNED_BYTE, "float", true, 2),
-    "4:unorm:8": f(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, "float", true, 4),
+    "1:unorm:8": f(gl.R8, gl.RED, gl.UNSIGNED_BYTE, "float", true, 1, true),
+    "2:unorm:8": f(gl.RG8, gl.RG, gl.UNSIGNED_BYTE, "float", true, 2, true),
+    "4:unorm:8": f(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, "float", true, 4, true),
 
     // 16-bit unsigned. WebGL2 has no core normalised 16-bit format (that is
     // EXT_texture_norm16), so these are integer textures and need a

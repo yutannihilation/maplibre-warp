@@ -20,6 +20,8 @@ import {
 interface UniformInfo {
   location: WebGLUniformLocation;
   type: GLenum;
+  /** Element count; greater than one for array uniforms. */
+  size: number;
 }
 
 /** A linked program plus everything needed to feed it. */
@@ -47,7 +49,7 @@ export class RasterProgram {
       const name = info.name.replace(/\[0\]$/, "");
       const location = gl.getUniformLocation(this.program, info.name);
       if (location) {
-        this.uniforms.set(name, { location, type: info.type });
+        this.uniforms.set(name, { location, type: info.type, size: info.size });
       }
     }
   }
@@ -88,7 +90,26 @@ export class RasterProgram {
       return;
     }
     const { gl } = this;
-    const { location, type } = info;
+    const { location, type, size } = info;
+
+    if (size > 1) {
+      switch (type) {
+        case gl.FLOAT:
+          gl.uniform1fv(location, asTyped(value, Float32Array));
+          return;
+        case gl.FLOAT_VEC4:
+          gl.uniform4fv(location, asTyped(value, Float32Array));
+          return;
+        case gl.INT:
+        case gl.BOOL:
+          gl.uniform1iv(location, asTyped(value, Int32Array));
+          return;
+        default:
+          throw new Error(
+            `Array uniform "${name}" has unsupported GL type 0x${type.toString(16)}`,
+          );
+      }
+    }
 
     switch (type) {
       case gl.FLOAT:
@@ -222,6 +243,24 @@ function linkProgram(
     throw new Error(`Failed to link WebGL program: ${log}`);
   }
   return program;
+}
+
+/** Coerce an array-valued uniform to the typed array GL expects. */
+function asTyped<T extends Float32Array | Int32Array>(
+  value: UniformValue,
+  ctor: (new (length: number) => T) & { from(values: ArrayLike<number>): T },
+): T {
+  if (value instanceof ctor) {
+    return value;
+  }
+  if (
+    Array.isArray(value) ||
+    value instanceof Float32Array ||
+    value instanceof Int32Array
+  ) {
+    return ctor.from(value as ArrayLike<number>);
+  }
+  throw new Error("array uniform needs an array value");
 }
 
 /** Prefix each line with its number, so compiler errors are locatable. */

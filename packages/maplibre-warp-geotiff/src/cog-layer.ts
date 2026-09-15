@@ -37,8 +37,16 @@ import type { Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
 import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
 import { fetchGeoTIFF } from "./geotiff-utils.js";
-import type { GeoTiffRenderer } from "./render-pipeline.js";
-import { inferRenderPipeline } from "./render-pipeline.js";
+import type {
+  ContourBandWithColor,
+  ContourRenderOptions,
+  GeoTiffRenderer,
+} from "./render-pipeline.js";
+import {
+  inferRenderPipeline,
+  resolveContourBands,
+  validateContourOptions,
+} from "./render-pipeline.js";
 
 /**
  * Default per-origin request cap. Six matches the browser's HTTP/1.1
@@ -77,6 +85,12 @@ export interface COGLayerProps extends RasterCustomLayerProps {
    */
   maxError?: number;
 
+  /**
+   * Render the raster as filled contour bands and/or lines instead of as
+   * imagery. See {@link ContourRenderOptions}.
+   */
+  contour?: ContourRenderOptions;
+
   /** Called once the GeoTIFF header has been read and its CRS resolved. */
   onGeoTIFFLoad?(
     geotiff: GeoTIFF,
@@ -110,12 +124,25 @@ export class COGLayer extends RasterCustomLayer {
 
   constructor(props: COGLayerProps) {
     super(props);
+    if (props.contour) {
+      // Fail here rather than inside the retried source-open path.
+      validateContourOptions(props.contour);
+    }
     this.props = props;
   }
 
   /** The opened GeoTIFF, once the header has been read. */
   get source(): GeoTIFF | undefined {
     return this.geotiff;
+  }
+
+  /**
+   * The contour band model with colours, for legends. Available before the
+   * COG has opened, since it depends only on the props; empty without
+   * `contour.bands`.
+   */
+  getBands(): ContourBandWithColor[] {
+    return this.props.contour ? resolveContourBands(this.props.contour) : [];
   }
 
   override onRemove(map: MapLibreMap, gl: WebGL2RenderingContext): void {
@@ -213,7 +240,9 @@ export class COGLayer extends RasterCustomLayer {
       Math.min(rawBounds[3], MAX_WEB_MERCATOR_LAT),
     ];
 
-    const renderer = inferRenderPipeline(geotiff, gl);
+    const renderer = inferRenderPipeline(geotiff, gl, {
+      contour: this.props.contour,
+    });
     this.renderer = renderer;
 
     this.props.onGeoTIFFLoad?.(geotiff, {

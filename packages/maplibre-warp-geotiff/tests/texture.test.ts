@@ -29,6 +29,7 @@ describe("inferTextureFormat", () => {
       type: "UNSIGNED_BYTE",
       sampler: "float",
       filterable: true,
+      normalized: true,
       bytesPerPixel: 1,
     });
     expect(inferTextureFormat(gl, 2, [8, 8], UINT)).toMatchObject({
