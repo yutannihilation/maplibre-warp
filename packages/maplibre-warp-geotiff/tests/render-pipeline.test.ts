@@ -212,13 +212,66 @@ describe("inferRenderPipeline with contour", () => {
       "isoband",
     ]);
     const linesOnly = inferRenderPipeline(geotiff, stubGl(), {
-      contour: { ...contour, bands: false },
+      contour: { ...contour, fill: "none" },
     });
     expect(moduleNames(linesOnly.buildPipeline(textures))).toEqual([
       "value-texture-float",
       "clear-color",
       "contour-line",
     ]);
+  });
+
+  it("builds value → value-gradient → contour-line for a gradient fill", () => {
+    const renderer = inferRenderPipeline(
+      fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
+      stubGl(),
+      {
+        contour: {
+          ...contour,
+          fill: "gradient",
+          bands: { colors: ["#000", "#fff"], includeLower: true },
+        },
+      },
+    );
+    const pipeline = renderer.buildPipeline(textures);
+    expect(moduleNames(pipeline)).toEqual([
+      "value-texture-float",
+      "value-gradient",
+      "contour-line",
+    ]);
+    // The ramp spans the first to the last threshold.
+    expect(pipeline[1]!.props).toMatchObject({
+      min: 100,
+      max: 300,
+      includeLower: true,
+      includeUpper: true,
+    });
+  });
+
+  it("requires colours for a fill and two thresholds for a gradient", () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Float,
+      bitsPerSample: 32,
+    });
+    expect(() =>
+      inferRenderPipeline(geotiff, stubGl(), {
+        contour: { thresholds: [1, 2] },
+      }),
+    ).toThrow(/needs `bands`/);
+    expect(() =>
+      inferRenderPipeline(geotiff, stubGl(), {
+        contour: { thresholds: [1], fill: "gradient", bands: contour.bands },
+      }),
+    ).toThrow(/at least two/);
+    expect(() =>
+      inferRenderPipeline(geotiff, stubGl(), {
+        contour: {
+          thresholds: [1, 2],
+          fill: "gradient",
+          bands: { colors: ["#000"] },
+        },
+      }),
+    ).toThrow(/at least two colour stops/);
   });
 
   it("exposes the band model with colours through resolveContourBands", () => {
@@ -300,18 +353,81 @@ describe("inferRenderPipeline with contour", () => {
       expect(later[2]!.props).toBe(built[2]!.props);
     });
 
-    it("refuses what compiled programs and built tiles cannot follow", () => {
-      const gl = stubGl();
+    it("switches the fill mode and lines on or off for built tiles", () => {
+      const deleted: unknown[] = [];
+      // `stubGl` answers every method itself, so intercept in front of it.
+      const gl = new Proxy(stubGl(), {
+        get: (target, name: string) =>
+          name === "deleteTexture"
+            ? (texture: unknown) => {
+                deleted.push(texture);
+              }
+            : target[name as keyof WebGL2RenderingContext],
+      });
       const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      const built = renderer.buildPipeline(textures);
+      const other = renderer.buildPipeline({ ...textures, width: 64 });
+      const bandTexture = built[1]!.props.colors.texture;
       const update = (options: Parameters<typeof resolveContourOptions>[0]) =>
         renderer.updateContour!(gl, resolveContourOptions(options));
-      expect(() => update({ ...contour, bands: false })).toThrow(
-        /switch bands/,
+
+      update({ ...contour, fill: "gradient", lines: false });
+      // The same arrays, re-filled: the payloads keep pointing at them.
+      expect(moduleNames(built)).toEqual([
+        "value-texture-float",
+        "value-gradient",
+      ]);
+      expect(moduleNames(other)).toEqual(moduleNames(built));
+      expect(built[1]!.props).toMatchObject({ min: 100, max: 300 });
+      expect(other[1]!.props).toBe(built[1]!.props);
+      // The band lookup texture went with the bands.
+      expect(deleted).toContain(bandTexture);
+      // The seed still describes its own tile.
+      expect(other[0]!.props.size).toEqual(new Float32Array([64, 128]));
+
+      update({ ...contour, fill: "none" });
+      expect(moduleNames(built)).toEqual([
+        "value-texture-float",
+        "clear-color",
+        "contour-line",
+      ]);
+
+      update(contour);
+      expect(moduleNames(built)).toEqual([
+        "value-texture-float",
+        "isoband",
+        "contour-line",
+      ]);
+      // Tiles built afterwards share the current objects.
+      expect(renderer.buildPipeline(textures)[1]!.props).toBe(built[1]!.props);
+    });
+
+    it("stops rebuilding a tile once its textures are destroyed", () => {
+      const gl = stubGl();
+      const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      const gone = { ...textures };
+      const pipeline = renderer.buildPipeline(gone);
+      renderer.destroyTileTextures(gl, gone);
+      renderer.updateContour!(
+        gl,
+        resolveContourOptions({ ...contour, fill: "none" }),
       );
-      expect(() => update({ ...contour, lines: false })).toThrow(
-        /switch lines/,
-      );
-      expect(() => update({ ...contour, band: 1 })).toThrow(RangeError);
+      expect(moduleNames(pipeline)).toEqual([
+        "value-texture-float",
+        "isoband",
+        "contour-line",
+      ]);
+    });
+
+    it("refuses to change the band", () => {
+      const gl = stubGl();
+      const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      expect(() =>
+        renderer.updateContour!(
+          gl,
+          resolveContourOptions({ ...contour, band: 1 }),
+        ),
+      ).toThrow(RangeError);
       // Nothing was applied by a refused update.
       expect(renderer.buildPipeline(textures)[1]!.props).toMatchObject({
         thresholds: { count: 3 },
@@ -351,7 +467,10 @@ describe("validateContourOptions", () => {
   it("accepts a valid configuration", () => {
     expect(() => validateContourOptions(base)).not.toThrow();
     expect(() =>
-      validateContourOptions({ thresholds: [1], bands: false }),
+      validateContourOptions({ thresholds: [1], fill: "none" }),
+    ).not.toThrow();
+    expect(() =>
+      validateContourOptions({ ...base, fill: "gradient" }),
     ).not.toThrow();
   });
 
@@ -381,7 +500,13 @@ describe("validateContourOptions", () => {
       }),
     ).toThrow(RangeError);
     expect(() =>
-      validateContourOptions({ thresholds: [1], bands: false, lines: false }),
+      validateContourOptions({ thresholds: [1], fill: "none", lines: false }),
+    ).toThrow(RangeError);
+    expect(() =>
+      validateContourOptions({
+        ...base,
+        fill: "solid" as unknown as "bands",
+      }),
     ).toThrow(RangeError);
     expect(() =>
       validateContourOptions({
@@ -423,13 +548,24 @@ describe("resolveContourBands", () => {
       { band: 1, min: 1, max: 2, color: "rgb(128, 0, 0)" },
       { band: 2, min: 2, color: "rgb(255, 0, 0)" },
     ]);
-    expect(resolveContourBands({ thresholds: [1], bands: false })).toEqual([]);
+    expect(resolveContourBands({ thresholds: [1], fill: "none" })).toEqual([]);
     expect(resolveContourBands({ thresholds: [1] })).toEqual([]);
+    expect(
+      resolveContourBands({
+        thresholds: [1, 2],
+        fill: "gradient",
+        bands: { colors: ["#000", "#fff"] },
+      }),
+    ).toEqual([]);
   });
 });
 
 describe("contour tile loading", () => {
-  const contour = { thresholds: [0.5], lines: { color: "#000" } };
+  const contour = {
+    thresholds: [0.5],
+    fill: "none" as const,
+    lines: { color: "#000" },
+  };
 
   /** A stub GL plus the uploads it records. */
   function recordingGl() {

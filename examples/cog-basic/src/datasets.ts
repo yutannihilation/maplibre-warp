@@ -1,4 +1,7 @@
-import type { ContourRenderOptions } from "@yutannihilation/maplibre-warp-geotiff";
+import type {
+  ContourFill,
+  ContourRenderOptions,
+} from "@yutannihilation/maplibre-warp-geotiff";
 import { MAX_THRESHOLDS } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 import {
   interpolateCividis,
@@ -41,7 +44,17 @@ export interface ContourSpec {
   includeLower?: boolean;
   /** Default d3 scheme; the UI may pick another. */
   scheme: SchemeId;
+  /** Line style, or `false` to start with lines off; the UI may toggle them. */
   lines: ContourRenderOptions["lines"];
+}
+
+/** What the contour controls describe, independent of the dataset. */
+export interface ContourStyle {
+  scheme: SchemeId;
+  bins: number;
+  fill: ContourFill;
+  /** Draw lines, with the dataset's style or the default when it has none. */
+  lines: boolean;
 }
 
 export interface Dataset {
@@ -78,15 +91,16 @@ export function linspace(from: number, to: number, count: number): number[] {
 }
 
 /**
- * Turn a spec into layer options. `bins` is the number of filled bands, so the
- * threshold count is one fewer when the open lower band is on. Pure: this is
- * what the UI re-runs on every scheme or bin change.
+ * Turn a spec and the control state into layer options. `bins` is the number
+ * of filled bands, so the threshold count is one fewer when the open lower
+ * band is on; the gradient spans the same thresholds, so its domain is the
+ * spec's. Pure: this is what the UI re-runs on every control change.
  */
 export function contourOptions(
   spec: ContourSpec,
-  scheme: SchemeId,
-  bins: number,
+  style: ContourStyle,
 ): ContourRenderOptions {
+  const { scheme, bins, fill, lines } = style;
   if (!Number.isInteger(bins) || bins < MIN_BINS || bins > MAX_BINS) {
     throw new RangeError(`bins must be an integer in ${MIN_BINS}–${MAX_BINS}`);
   }
@@ -98,8 +112,9 @@ export function contourOptions(
   );
   return {
     thresholds,
+    fill,
     bands: { colors: SCHEMES[scheme], includeLower },
-    lines: spec.lines,
+    lines: lines ? (spec.lines === false ? undefined : spec.lines) : false,
   };
 }
 

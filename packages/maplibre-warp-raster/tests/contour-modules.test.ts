@@ -7,6 +7,7 @@ import {
   Isoband,
   MAX_THRESHOLDS,
   packThresholds,
+  ValueGradient,
   ValueTexture,
 } from "../src/gpu-modules/index.js";
 import { pipelineKey } from "../src/shader/module.js";
@@ -154,6 +155,42 @@ describe("Isoband", () => {
   });
 });
 
+describe("ValueGradient", () => {
+  const props = {
+    min: 100,
+    max: 300,
+    includeLower: false,
+    includeUpper: true,
+    colors: texture,
+  };
+
+  it("maps props to uniforms", () => {
+    const bindings = ValueGradient.getUniforms!(props);
+    expect(bindings.uniforms).toEqual({
+      u_gradient_min: 100,
+      u_gradient_max: 300,
+      u_gradient_include_lower: 0,
+      u_gradient_include_upper: 1,
+    });
+    expect(bindings.textures).toEqual({ u_gradient_colors: texture });
+  });
+
+  it("rejects an empty or inverted domain", () => {
+    expect(() => ValueGradient.getUniforms!({ ...props, max: 100 })).toThrow(
+      RangeError,
+    );
+    expect(() => ValueGradient.getUniforms!({ ...props, max: NaN })).toThrow(
+      RangeError,
+    );
+  });
+
+  it("samples the ramp by normalised value and never discards", () => {
+    expect(ValueGradient.fsColor).toContain("texture(u_gradient_colors");
+    expect(ValueGradient.fsColor).toContain("clamp(");
+    expect(ValueGradient.fsColor).not.toContain("discard");
+  });
+});
+
 describe("ContourLine", () => {
   it("passes precomputed colours and thresholds through", () => {
     const thresholds = packThresholds([10, 20]);
@@ -201,6 +238,20 @@ describe("fragment assembly with contour modules", () => {
     expect(pipelineKey("mercator", pipeline)).toBe(
       "mercator|value-texture-float,isoband,contour-line",
     );
+  });
+
+  it("keys a gradient chain apart from a band chain", () => {
+    const pipeline = [
+      { module: ValueTexture.float },
+      { module: ValueGradient },
+      { module: ContourLine },
+    ];
+    expect(pipelineKey("mercator", pipeline)).toBe(
+      "mercator|value-texture-float,value-gradient,contour-line",
+    );
+    const source = buildFragmentSource(pipeline);
+    expect(source).toContain("uniform sampler2D u_gradient_colors;");
+    expect(source.match(/uniform float u_thresholds\[/g)).toHaveLength(1);
   });
 
   it("supports a lines-only chain over a transparent base", () => {

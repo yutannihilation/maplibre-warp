@@ -3,8 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   bandColorImage,
   bandsFromThresholds,
+  GRADIENT_FUNCTION_STOPS,
+  GRADIENT_IMAGE_WIDTH,
+  gradientColorImage,
   parseCssColor,
   resolveBandColors,
+  resolveGradientStops,
 } from "../src/gpu-modules/contour-bands.js";
 
 describe("bandsFromThresholds", () => {
@@ -96,5 +100,56 @@ describe("bandColorImage", () => {
     expect(image.width).toBe(2);
     expect(image.height).toBe(1);
     expect(Array.from(image.data)).toEqual([255, 0, 0, 255, 0, 0, 255, 128]);
+  });
+});
+
+describe("resolveGradientStops", () => {
+  it("passes an array of at least two stops through", () => {
+    expect(resolveGradientStops(["#000", "#888", "#fff"])).toEqual([
+      "#000",
+      "#888",
+      "#fff",
+    ]);
+    expect(() => resolveGradientStops(["#000"])).toThrow(RangeError);
+  });
+
+  it("samples a colour function along the ramp", () => {
+    const stops = resolveGradientStops(
+      (t) => `rgb(${Math.round(t * 255)}, 0, 0)`,
+    );
+    expect(stops).toHaveLength(GRADIENT_FUNCTION_STOPS);
+    expect(stops[0]).toBe("rgb(0, 0, 0)");
+    expect(stops.at(-1)).toBe("rgb(255, 0, 0)");
+  });
+});
+
+describe("gradientColorImage", () => {
+  it("interpolates the stops linearly across the row", () => {
+    const image = gradientColorImage(["#000000", "#ff0000"], 5);
+    expect(image.width).toBe(5);
+    expect(image.height).toBe(1);
+    expect(Array.from(image.data)).toEqual([
+      0, 0, 0, 255, 64, 0, 0, 255, 128, 0, 0, 255, 191, 0, 0, 255, 255, 0, 0,
+      255,
+    ]);
+  });
+
+  it("places intermediate stops evenly and interpolates alpha too", () => {
+    const image = gradientColorImage(
+      ["rgba(0, 0, 0, 0)", "#00ff00", "rgba(0, 0, 255, 1)"],
+      3,
+    );
+    expect(Array.from(image.data)).toEqual([
+      0, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 255,
+    ]);
+  });
+
+  it("defaults to the ramp texture width and rejects degenerate input", () => {
+    expect(gradientColorImage(["#000", "#fff"]).width).toBe(
+      GRADIENT_IMAGE_WIDTH,
+    );
+    expect(() => gradientColorImage(["#000"])).toThrow(RangeError);
+    expect(() => gradientColorImage(["#000", "#fff"], 1)).toThrow(RangeError);
+    expect(() => gradientColorImage(["#000", "red"])).toThrow(RangeError);
   });
 });
