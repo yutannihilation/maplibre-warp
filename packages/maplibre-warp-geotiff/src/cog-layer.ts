@@ -44,8 +44,7 @@ import type {
 } from "./render-pipeline.js";
 import {
   inferRenderPipeline,
-  resolveContourBands,
-  validateContourOptions,
+  resolveContourOptions,
 } from "./render-pipeline.js";
 
 /**
@@ -119,6 +118,10 @@ export interface COGLayerProps extends RasterCustomLayerProps {
  */
 export class COGLayer extends RasterCustomLayer {
   private readonly props: COGLayerProps;
+  /** Current contour options; starts as `props.contour`, see {@link setContour}. */
+  private contour?: ContourRenderOptions;
+  /** Band model of {@link contour}, resolved once alongside its validation. */
+  private contourBands: ContourBandWithColor[] = [];
   private renderer?: GeoTiffRenderer;
   private geotiff?: GeoTIFF;
 
@@ -126,9 +129,10 @@ export class COGLayer extends RasterCustomLayer {
     super(props);
     if (props.contour) {
       // Fail here rather than inside the retried source-open path.
-      validateContourOptions(props.contour);
+      this.contourBands = resolveContourOptions(props.contour).bands;
     }
     this.props = props;
+    this.contour = props.contour;
   }
 
   /** The opened GeoTIFF, once the header has been read. */
@@ -138,11 +142,47 @@ export class COGLayer extends RasterCustomLayer {
 
   /**
    * The contour band model with colours, for legends. Available before the
-   * COG has opened, since it depends only on the props; empty without
+   * COG has opened, since it depends only on the options; empty without
    * `contour.bands`.
    */
   getBands(): ContourBandWithColor[] {
-    return this.props.contour ? resolveContourBands(this.props.contour) : [];
+    return this.contourBands.slice();
+  }
+
+  /**
+   * Re-style the contours without reloading anything: thresholds, band
+   * colours, `includeLower`/`includeUpper` and line style are uniforms and a
+   * lookup texture, so tiles already on the GPU pick the change up on the
+   * next frame. Takes effect immediately when the layer is on a map, or at
+   * `onAdd` otherwise.
+   *
+   * What a compiled program and its built tiles cannot follow is refused with
+   * a `RangeError`, as is any option that fails the constructor's validation:
+   * the layer must have been created with `contour`, and the new options may
+   * not switch `bands` or `lines` on or off nor change `band`. Recreate the
+   * layer for those.
+   */
+  setContour(contour: ContourRenderOptions): void {
+    if (!this.contour) {
+      throw new RangeError(
+        "setContour needs a layer created with `contour`; imagery cannot be switched to contours in place",
+      );
+    }
+    // Resolved exactly once: this validates, feeds the renderer, and is what
+    // `getBands()` hands out afterwards.
+    const resolved = resolveContourOptions(
+      contour,
+      this.geotiff?.cachedTags.samplesPerPixel,
+    );
+    if (this.renderer && this.gl) {
+      if (!this.renderer.updateContour) {
+        throw new Error("the active renderer does not support updateContour");
+      }
+      this.renderer.updateContour(this.gl, resolved);
+      this.map?.triggerRepaint();
+    }
+    this.contour = contour;
+    this.contourBands = resolved.bands;
   }
 
   override onRemove(map: MapLibreMap, gl: WebGL2RenderingContext): void {
@@ -241,7 +281,7 @@ export class COGLayer extends RasterCustomLayer {
     ];
 
     const renderer = inferRenderPipeline(geotiff, gl, {
-      contour: this.props.contour,
+      contour: this.contour,
     });
     this.renderer = renderer;
 

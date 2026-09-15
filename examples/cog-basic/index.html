@@ -35,6 +35,26 @@
         width: 100%;
         margin-bottom: 8px;
       }
+      #contour-controls {
+        margin: 0 0 8px;
+        padding: 6px 8px 2px;
+        border: 1px solid rgba(0, 0, 0, 0.15);
+        border-radius: 4px;
+      }
+      #contour-controls legend {
+        padding: 0 4px;
+        font-weight: 600;
+      }
+      #contour-controls output {
+        float: right;
+        font-weight: 400;
+        font-variant-numeric: tabular-nums;
+      }
+      #contour-controls input[type="range"] {
+        display: block;
+        width: 100%;
+        margin: 0 0 8px;
+      }
       #status {
         margin-top: 8px;
         color: #444;
@@ -71,6 +91,13 @@
         <option value="globe">globe (mercator above z12)</option>
         <option value="vertical-perspective">vertical-perspective</option>
       </select>
+      <fieldset id="contour-controls" hidden>
+        <legend>Contours</legend>
+        <label for="scheme">Colour scheme</label>
+        <select id="scheme"></select>
+        <label for="bins">Bins <output for="bins" id="bins-value"></output></label>
+        <input id="bins" type="range" step="1" />
+      </fieldset>
       <div id="status">loading…</div>
       <div id="legend"></div>
     </div>

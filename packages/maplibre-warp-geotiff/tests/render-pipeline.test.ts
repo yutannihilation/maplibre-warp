@@ -5,6 +5,7 @@ import type { GeoTiffTileTextures } from "../src/render-pipeline.js";
 import {
   inferRenderPipeline,
   resolveContourBands,
+  resolveContourOptions,
   validateContourOptions,
 } from "../src/render-pipeline.js";
 
@@ -225,6 +226,79 @@ describe("inferRenderPipeline with contour", () => {
         { contour: { ...contour, bands: { colors: ["#000"] } } },
       ),
     ).toThrow(RangeError);
+  });
+
+  describe("updateContour", () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Float,
+      bitsPerSample: 32,
+    });
+
+    it("re-styles tiles that were built before the change", () => {
+      const gl = stubGl();
+      const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      const built = renderer.buildPipeline(textures);
+      const oldColors = (built[1]!.props as { colors: unknown }).colors;
+
+      renderer.updateContour!(
+        gl,
+        resolveContourOptions({
+          thresholds: [10, 20, 30, 40],
+          bands: {
+            colors: (t) => `rgb(${Math.round(t * 255)}, 0, 0)`,
+            includeLower: true,
+          },
+          lines: { width: 3, color: "#fff" },
+        }),
+      );
+
+      // Same props objects, so the already-built pipeline sees the update…
+      expect(built[1]!.props).toMatchObject({
+        thresholds: { count: 4 },
+        includeLower: true,
+      });
+      expect(Array.from(built[1]!.props.thresholds.values.slice(0, 4))).toEqual(
+        [10, 20, 30, 40],
+      );
+      // …with a fresh lookup texture, since its width is the band count.
+      expect(built[1]!.props.colors).not.toBe(oldColors);
+      expect(built[2]!.props).toMatchObject({
+        width: 3,
+        majorEvery: undefined,
+        thresholds: { count: 4 },
+      });
+      expect(Array.from(built[2]!.props.color)).toEqual([1, 1, 1, 1]);
+      // Tiles built afterwards share the same objects still.
+      const later = renderer.buildPipeline(textures);
+      expect(later[1]!.props).toBe(built[1]!.props);
+      expect(later[2]!.props).toBe(built[2]!.props);
+    });
+
+    it("refuses what compiled programs and built tiles cannot follow", () => {
+      const gl = stubGl();
+      const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      const update = (options: Parameters<typeof resolveContourOptions>[0]) =>
+        renderer.updateContour!(gl, resolveContourOptions(options));
+      expect(() => update({ ...contour, bands: false })).toThrow(
+        /switch bands/,
+      );
+      expect(() => update({ ...contour, lines: false })).toThrow(
+        /switch lines/,
+      );
+      expect(() => update({ ...contour, band: 1 })).toThrow(RangeError);
+      // Nothing was applied by a refused update.
+      expect(renderer.buildPipeline(textures)[1]!.props).toMatchObject({
+        thresholds: { count: 3 },
+      });
+    });
+
+    it("is absent from the imagery renderer", () => {
+      const renderer = inferRenderPipeline(
+        fakeGeoTiff({ sampleFormat: SampleFormat.Uint, bitsPerSample: 8 }),
+        stubGl(),
+      );
+      expect(renderer.updateContour).toBeUndefined();
+    });
   });
 
   it("selects the requested band of a multi-band raster", () => {

@@ -239,6 +239,16 @@ export interface GeoTiffRenderer {
   ): void;
   /** Release layer-wide resources such as the colormap texture. */
   destroy(gl: WebGL2RenderingContext): void;
+  /**
+   * Re-style contours in place, for every tile already built. Only the
+   * contour renderer has this; see `COGLayer.setContour` for what a change
+   * may and may not touch. Takes options already run through
+   * {@link resolveContourOptions} so the caller validates exactly once.
+   */
+  updateContour?(
+    gl: WebGL2RenderingContext,
+    contour: ResolvedContourOptions,
+  ): void;
 }
 
 export function inferRenderPipeline(
@@ -518,26 +528,80 @@ function createContourRenderer(
   const offset = geotiff.offsets[band] ?? 0;
   const nodataSampled = nodata === null ? null : nodata / denorm;
 
-  let bandColorTexture: WebGLTexture | undefined;
-  let isobandProps: IsobandProps | undefined;
-  if (resolved.bandImage) {
-    bandColorTexture = createTexture2D(gl, {
-      width: resolved.bandImage.width,
-      height: resolved.bandImage.height,
-      data: resolved.bandImage.data,
-      format: inferTextureFormat(gl, 4, [8, 8, 8, 8], [SampleFormat.Uint]),
+  const bandColorTexture = (
+    glContext: WebGL2RenderingContext,
+    image: BandColorImage,
+  ): WebGLTexture =>
+    createTexture2D(glContext, {
+      width: image.width,
+      height: image.height,
+      data: image.data,
+      format: inferTextureFormat(
+        glContext,
+        4,
+        [8, 8, 8, 8],
+        [SampleFormat.Uint],
+      ),
       linear: false,
     });
+
+  // These two objects are shared by reference with every tile's pipeline,
+  // which is what lets `updateContour` re-style tiles that are already built:
+  // mutate them, and the next `getUniforms` pass sees the new values.
+  let isobandProps: IsobandProps | undefined;
+  if (resolved.bandImage) {
     isobandProps = {
       thresholds,
       includeLower: resolved.includeLower,
       includeUpper: resolved.includeUpper,
-      colors: { texture: bandColorTexture, target: gl.TEXTURE_2D },
+      colors: {
+        texture: bandColorTexture(gl, resolved.bandImage),
+        target: gl.TEXTURE_2D,
+      },
     };
   }
   const lineProps: ContourLineProps | undefined = resolved.lines
     ? { thresholds, ...resolved.lines }
     : undefined;
+
+  const updateContour = (
+    glContext: WebGL2RenderingContext,
+    next: ResolvedContourOptions,
+  ): void => {
+    // The seed props (band index) are copied into each tile at build time and
+    // the module chain is fixed per compiled program, so neither can follow a
+    // change here. Refuse rather than leave old tiles styled differently.
+    if (next.band !== band) {
+      throw new RangeError(
+        `setContour cannot change the band (${band} → ${next.band}); recreate the layer`,
+      );
+    }
+    if ((next.bandImage !== null) !== (isobandProps !== undefined)) {
+      throw new RangeError(
+        "setContour cannot switch bands on or off; recreate the layer",
+      );
+    }
+    if ((next.lines !== null) !== (lineProps !== undefined)) {
+      throw new RangeError(
+        "setContour cannot switch lines on or off; recreate the layer",
+      );
+    }
+    if (isobandProps && next.bandImage) {
+      // The lookup row is one texel per band, so its width changes with the
+      // band count: replace the texture rather than re-upload into it. Create
+      // the new one first — if that fails the tiles keep a live texture and
+      // consistent (old) thresholds instead of sampling a deleted one.
+      const texture = bandColorTexture(glContext, next.bandImage);
+      glContext.deleteTexture(isobandProps.colors.texture);
+      isobandProps.colors = { texture, target: glContext.TEXTURE_2D };
+      isobandProps.thresholds = next.thresholds;
+      isobandProps.includeLower = next.includeLower;
+      isobandProps.includeUpper = next.includeUpper;
+    }
+    if (lineProps && next.lines) {
+      Object.assign(lineProps, next.lines, { thresholds: next.thresholds });
+    }
+  };
 
   const buildPipeline = (textures: GeoTiffTileTextures): RenderPipeline => {
     const pipeline: RenderPipeline = [
@@ -580,9 +644,10 @@ function createContourRenderer(
     buildPipeline,
     destroyTileTextures,
     destroy: (glContext) => {
-      if (bandColorTexture) {
-        glContext.deleteTexture(bandColorTexture);
+      if (isobandProps) {
+        glContext.deleteTexture(isobandProps.colors.texture);
       }
     },
+    updateContour,
   };
 }
