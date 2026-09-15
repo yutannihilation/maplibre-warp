@@ -1,6 +1,6 @@
 import { Photometric, SampleFormat } from "@cogeotiff/core";
 import type { GeoTIFF } from "@developmentseed/geotiff";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { GeoTiffTileTextures } from "../src/render-pipeline.js";
 import {
   inferRenderPipeline,
@@ -9,8 +9,18 @@ import {
   validateContourOptions,
 } from "../src/render-pipeline.js";
 
-/** A GL stub: constants read back as their names, calls are no-ops. */
-function stubGl(): WebGL2RenderingContext {
+/** A texImage2D upload seen by {@link stubGl}. */
+interface Upload {
+  width: number;
+  height: number;
+  data: unknown;
+}
+
+/**
+ * A GL stub: constants read back as their names, calls are no-ops. Pass
+ * `uploads` to record every texImage2D call.
+ */
+function stubGl(uploads?: Upload[]): WebGL2RenderingContext {
   return new Proxy(
     {},
     {
@@ -20,6 +30,21 @@ function stubGl(): WebGL2RenderingContext {
         }
         if (name === "getParameter") {
           return () => 0;
+        }
+        if (uploads && name === "texImage2D") {
+          return (
+            _t: unknown,
+            _l: unknown,
+            _if: unknown,
+            width: number,
+            height: number,
+            _b: unknown,
+            _f: unknown,
+            _ty: unknown,
+            data: unknown,
+          ) => {
+            uploads.push({ width, height, data });
+          };
         }
         if (/^[a-z]/.test(name)) {
           return () => {};
@@ -59,6 +84,7 @@ function fakeGeoTiff(tags: {
 const textures: GeoTiffTileTextures = {
   width: 256,
   height: 128,
+  halo: 0,
   texture: {} as WebGLTexture,
   byteLength: 0,
 };
@@ -399,5 +425,201 @@ describe("resolveContourBands", () => {
     ]);
     expect(resolveContourBands({ thresholds: [1], bands: false })).toEqual([]);
     expect(resolveContourBands({ thresholds: [1] })).toEqual([]);
+  });
+});
+
+describe("contour tile loading", () => {
+  const contour = { thresholds: [0.5], lines: { color: "#000" } };
+
+  /** A stub GL plus the uploads it records. */
+  function recordingGl() {
+    const uploads: Upload[] = [];
+    return { gl: stubGl(uploads), uploads };
+  }
+
+  /**
+   * A 2 × 2-tile image of 2 × 2-pixel float tiles, each filled with 10·x + y.
+   * Tiles listed in `failing` are missing, as a sparse COG's would be.
+   */
+  function fakeImage(withMask = false, failing: Array<[number, number]> = []) {
+    const fails = (x: number, y: number) =>
+      failing.some(([fx, fy]) => fx === x && fy === y);
+    const tileAt = (x: number, y: number) => {
+      if (fails(x, y)) {
+        throw new Error(`Tile at (${x}, ${y}) not found`);
+      }
+      return {
+        x,
+        y,
+        array: {
+          layout: "pixel-interleaved" as const,
+          width: 2,
+          height: 2,
+          count: 1,
+          data: new Float32Array(4).fill(10 * x + y),
+          mask: withMask ? new Uint8Array([255, 255, 0, 255]) : null,
+        },
+      };
+    };
+    const fetchTiles = vi.fn(async (xy: Array<[number, number]>) =>
+      xy.map(([x, y]) => tileAt(x, y)),
+    );
+    const fetchTile = vi.fn(async (x: number, y: number) => tileAt(x, y));
+    return {
+      image: {
+        tileCount: { x: 2, y: 2 },
+        fetchTiles,
+        fetchTile,
+      } as unknown as GeoTIFF,
+      fetchTiles,
+      fetchTile,
+    };
+  }
+
+  it("pads each tile with a halo stitched from its neighbours", async () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Float,
+      bitsPerSample: 32,
+    });
+    const { gl, uploads } = recordingGl();
+    const renderer = inferRenderPipeline(geotiff, gl, { contour });
+    const { image, fetchTiles } = fakeImage();
+
+    const tile = await renderer.loadTileTextures(image, {
+      gl,
+      x: 0,
+      y: 0,
+      signal: new AbortController().signal,
+    });
+
+    // Content size is reported; the texture itself is padded.
+    expect(tile).toMatchObject({ width: 2, height: 2, halo: 1 });
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]).toMatchObject({ width: 4, height: 4 });
+    expect(tile.byteLength).toBe(4 * 4 * 4);
+    // Top-left tile: only right (1,0), bottom (0,1) and diagonal (1,1) exist.
+    expect(fetchTiles).toHaveBeenCalledTimes(1);
+    expect(fetchTiles.mock.calls[0]![0]).toEqual([
+      [0, 0],
+      [1, 0],
+      [0, 1],
+      [1, 1],
+    ]);
+    // Row 1 of the padded texture: [clamp, 0, 0, right neighbour = 10].
+    expect(Array.from(uploads[0]!.data as Float32Array)).toEqual([
+      0, 0, 0, 10, 0, 0, 0, 10, 0, 0, 0, 10, 1, 1, 1, 11,
+    ]);
+
+    // The pipeline hands the halo to the seed.
+    const seed = renderer.buildPipeline(tile)[0]!;
+    expect(seed.props).toMatchObject({ halo: 1 });
+    expect((seed.props as { size: Float32Array }).size).toEqual(
+      new Float32Array([2, 2]),
+    );
+  });
+
+  it("reuses cached neighbours for the next tile", async () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Float,
+      bitsPerSample: 32,
+    });
+    const { gl } = recordingGl();
+    const renderer = inferRenderPipeline(geotiff, gl, { contour });
+    const { image, fetchTiles } = fakeImage();
+    const signal = new AbortController().signal;
+    await renderer.loadTileTextures(image, { gl, x: 0, y: 0, signal });
+    await renderer.loadTileTextures(image, { gl, x: 1, y: 0, signal });
+    // Every tile of the 2 × 2 image was already fetched for the first one.
+    expect(fetchTiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a tile whose neighbour is missing, clamping that seam", async () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Float,
+      bitsPerSample: 32,
+    });
+    const { gl, uploads } = recordingGl();
+    const renderer = inferRenderPipeline(geotiff, gl, { contour });
+    const { image } = fakeImage(false, [[1, 0]]);
+    const tile = await renderer.loadTileTextures(image, {
+      gl,
+      x: 0,
+      y: 0,
+      signal: new AbortController().signal,
+    });
+    expect(tile).toMatchObject({ width: 2, height: 2, halo: 1 });
+    // Right column clamps to the centre (0) where (1,0) would have been 10;
+    // the bottom row still comes from (0,1) and the corner from (1,1).
+    expect(Array.from(uploads[0]!.data as Float32Array)).toEqual([
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 11,
+    ]);
+  });
+
+  it("fails the load only when the tile itself is missing", async () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Float,
+      bitsPerSample: 32,
+    });
+    const { gl } = recordingGl();
+    const renderer = inferRenderPipeline(geotiff, gl, { contour });
+    const { image } = fakeImage(false, [[0, 0]]);
+    await expect(
+      renderer.loadTileTextures(image, {
+        gl,
+        x: 0,
+        y: 0,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow("Tile at (0, 0) not found");
+  });
+
+  it("uploads the mask at content size, unpadded", async () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Float,
+      bitsPerSample: 32,
+    });
+    const { gl, uploads } = recordingGl();
+    const renderer = inferRenderPipeline(geotiff, gl, { contour });
+    const { image } = fakeImage(true);
+    const tile = await renderer.loadTileTextures(image, {
+      gl,
+      x: 1,
+      y: 1,
+      signal: new AbortController().signal,
+    });
+    expect(tile.mask).toBeDefined();
+    expect(uploads.map((u) => [u.width, u.height])).toEqual([
+      [4, 4],
+      [2, 2],
+    ]);
+    expect(tile.byteLength).toBe(4 * 4 * 4 + 2 * 2);
+  });
+
+  it("leaves the RGB renderer without a halo", async () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Uint,
+      bitsPerSample: 8,
+      samplesPerPixel: 4,
+    });
+    const { gl, uploads } = recordingGl();
+    const renderer = inferRenderPipeline(geotiff, gl);
+    const fetchTile = vi.fn(async (x: number, y: number) => ({
+      x,
+      y,
+      array: {
+        layout: "pixel-interleaved" as const,
+        width: 2,
+        height: 2,
+        count: 4,
+        data: new Uint8Array(16),
+        mask: null,
+      },
+    }));
+    const tile = await renderer.loadTileTextures(
+      { fetchTile } as unknown as GeoTIFF,
+      { gl, x: 0, y: 0, signal: new AbortController().signal },
+    );
+    expect(tile.halo).toBe(0);
+    expect(uploads[0]).toMatchObject({ width: 2, height: 2 });
   });
 });

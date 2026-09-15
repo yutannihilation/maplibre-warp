@@ -36,11 +36,7 @@ export function addAlphaChannel(
   const source = rgbImage.data;
   // Keep the input's element type so the padded array still matches the
   // texture format chosen for it; alpha is the type's "fully opaque" value.
-  const rgbaArray = new (
-    source.constructor as new (
-      n: number,
-    ) => RasterTypedArray
-  )(rgbaLength);
+  const rgbaArray = allocateLike(source, rgbaLength);
   const maxAlpha = opaqueAlphaFor(source);
   for (let i = 0; i < source.length / 3; ++i) {
     rgbaArray[i * 4] = source[i * 3]!;
@@ -54,6 +50,21 @@ export function addAlphaChannel(
     count: 4,
     data: rgbaArray,
   };
+}
+
+/** A zero-filled typed array of `length` with the same element type as `source`. */
+export function allocateLike(
+  source: RasterTypedArray,
+  length: number,
+): RasterTypedArray {
+  return new (source.constructor as new (n: number) => RasterTypedArray)(
+    length,
+  );
+}
+
+/** The rejection every aborted tile load carries. */
+export function abortError(): DOMException {
+  return new DOMException("Tile load aborted", "AbortError");
 }
 
 /** The value that reads as fully opaque alpha for a sample type. */

@@ -56,6 +56,7 @@ describe("ValueTexture", () => {
       u_value_scale: 0.1,
       u_value_offset: 5,
       u_value_size: size,
+      u_value_halo: 0,
     });
     expect(
       ValueTexture.float.getUniforms!({
@@ -69,6 +70,32 @@ describe("ValueTexture", () => {
       u_value_scale: 1,
       u_value_offset: 0,
     });
+  });
+
+  it("offsets texel lookups into the halo", () => {
+    for (const kind of ["float", "uint", "int"] as const) {
+      const body = ValueTexture[kind].fsColor!;
+      expect(body).toContain("- 0.5 + float(u_value_halo)");
+      expect(body).toContain("ivec2(u_value_size) + 2 * u_value_halo - 1");
+    }
+    expect(
+      ValueTexture.float.getUniforms!({
+        texture,
+        band: 0,
+        nodata: null,
+        size: new Float32Array([4, 4]),
+        halo: 1,
+      }).uniforms,
+    ).toMatchObject({ u_value_halo: 1 });
+    expect(() =>
+      ValueTexture.float.getUniforms!({
+        texture,
+        band: 0,
+        nodata: null,
+        size: new Float32Array([4, 4]),
+        halo: -1,
+      }),
+    ).toThrow(RangeError);
   });
 
   it("rejects bands outside 0..3", () => {
