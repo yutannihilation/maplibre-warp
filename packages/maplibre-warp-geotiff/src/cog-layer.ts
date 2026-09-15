@@ -36,7 +36,7 @@ import {
 import type { Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
 import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
-import { fetchGeoTIFF } from "./geotiff-utils.js";
+import { abortError, fetchGeoTIFF } from "./geotiff-utils.js";
 import type {
   ContourBandWithColor,
   ContourRenderOptions,
@@ -322,7 +322,7 @@ export class COGLayer extends RasterCustomLayer {
 
       if (context.signal.aborted) {
         renderer.destroyTileTextures(context.gl, textures);
-        throw new DOMException("Tile load aborted", "AbortError");
+        throw abortError();
       }
 
       const level = descriptor.levels[index.z]!;

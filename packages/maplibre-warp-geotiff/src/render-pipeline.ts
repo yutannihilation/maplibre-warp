@@ -10,7 +10,14 @@
  */
 
 import { Photometric, SampleFormat } from "@cogeotiff/core";
-import type { DecoderPool, GeoTIFF, Overview } from "@developmentseed/geotiff";
+import type {
+  DecoderPool,
+  GeoTIFF,
+  Overview,
+  RasterArray,
+  RasterArrayPixelInterleaved,
+  RasterTypedArray,
+} from "@developmentseed/geotiff";
 import { parseColormap } from "@developmentseed/geotiff";
 import type { RenderPipeline } from "@yutannihilation/maplibre-warp-raster";
 import type {
@@ -43,15 +50,30 @@ import {
 
 import { addAlphaChannel, toGlView } from "./geotiff-utils.js";
 import {
+  HALO,
+  neighbourCoordinates,
+  neighbourIndex,
+  stitchHalo,
+} from "./halo.js";
+import {
   createColormapTexture,
   createTexture2D,
   inferTextureFormat,
 } from "./texture.js";
+import { DecodedTileCache } from "./tile-cache.js";
 
 /** GPU textures for a single decoded tile. */
 export interface GeoTiffTileTextures {
+  /** Content width in texels, excluding any halo. */
   width: number;
+  /** Content height in texels, excluding any halo. */
   height: number;
+  /**
+   * Texels of neighbour data padding `texture` on every side, so it is
+   * `(width + 2·halo) × (height + 2·halo)`. `mask`, when present, is never
+   * padded.
+   */
+  halo: number;
   texture: WebGLTexture;
   mask?: WebGLTexture;
   /** GPU bytes held by these textures. */
@@ -431,40 +453,116 @@ function createUnormRenderer(
  * Fetch and upload one tile's textures. Shared by every renderer; only the
  * texture format and filtering differ.
  */
-function tileTextureLoader({
-  samplesPerPixel,
-  textureFormat,
-  linearFilter,
-}: {
-  samplesPerPixel: number;
-  textureFormat: ReturnType<typeof inferTextureFormat>;
-  linearFilter: boolean;
-}): GeoTiffRenderer["loadTileTextures"] {
-  return async (image, options) => {
+/** One tile's decoded pixels, ready for upload. */
+interface TilePixels {
+  /** `(width + 2·halo) × (height + 2·halo)` texels, `samplesPerPixel` each. */
+  data: RasterTypedArray;
+  /** Content size in texels, excluding the halo. */
+  width: number;
+  height: number;
+  halo: number;
+  /** Content-sized validity mask, if the image has one. */
+  mask: Uint8Array | null;
+}
+
+/**
+ * Fetch one tile's decoded pixels. With `haloCache`, the tile's in-image
+ * neighbours are fetched through the cache too and their edge texels are
+ * stitched around it (see `halo.ts`). A neighbour that fails to load
+ * (sparse, corrupt, or a transient error) is left out of the halo, which
+ * clamps that seam the way a tile on the image edge is clamped; only the
+ * tile's own failure fails the load. Three-sample data is padded to four.
+ */
+async function fetchTilePixels(
+  image: GeoTIFF | Overview,
+  options: Parameters<GeoTiffRenderer["loadTileTextures"]>[1],
+  haloCache: DecodedTileCache | undefined,
+  samplesPerPixel: number,
+): Promise<TilePixels> {
+  const upload = (array: RasterArrayPixelInterleaved): RasterTypedArray =>
+    samplesPerPixel === 3 ? addAlphaChannel(array).data : array.data;
+
+  if (!haloCache) {
     const tile = await image.fetchTile(options.x, options.y, {
       boundless: false,
       pool: options.pool,
       signal: options.signal,
     });
-
-    let { array } = tile;
+    const array = interleaved(tile.array);
     const { width, height, mask } = array;
+    return { data: upload(array), width, height, halo: 0, mask };
+  }
 
-    if (array.layout === "band-separate") {
-      throw new Error("Band-separate images not yet implemented.");
+  const { x: tilesAcross, y: tilesDown } = image.tileCount;
+  const neighbours = neighbourCoordinates(
+    options.x,
+    options.y,
+    tilesAcross,
+    tilesDown,
+  );
+  const [own, ...others] = await haloCache.getTiles(
+    image,
+    [[options.x, options.y], ...neighbours.map((n) => [n.x, n.y] as const)],
+    { pool: options.pool, signal: options.signal },
+  );
+  if (own!.status === "rejected") {
+    throw own!.reason;
+  }
+  const centre = interleaved(own!.value.array);
+  const grid: Array<RasterArrayPixelInterleaved | undefined> = [];
+  neighbours.forEach((neighbour, i) => {
+    const result = others[i]!;
+    if (result.status === "fulfilled") {
+      grid[neighbourIndex(neighbour.offset)] = interleaved(result.value.array);
     }
-    if (samplesPerPixel === 3) {
-      array = addAlphaChannel(array);
-    }
+  });
+  const { width, height, mask } = centre;
+  const padded: RasterArrayPixelInterleaved = {
+    ...centre,
+    width: width + 2 * HALO,
+    height: height + 2 * HALO,
+    data: stitchHalo(centre, grid),
+  };
+  return { data: upload(padded), width, height, halo: HALO, mask };
+}
+
+function interleaved(array: RasterArray): RasterArrayPixelInterleaved {
+  if (array.layout === "band-separate") {
+    throw new Error("Band-separate images not yet implemented.");
+  }
+  return array;
+}
+
+function tileTextureLoader({
+  samplesPerPixel,
+  textureFormat,
+  linearFilter,
+  haloCache,
+}: {
+  samplesPerPixel: number;
+  textureFormat: ReturnType<typeof inferTextureFormat>;
+  linearFilter: boolean;
+  /** Pad every tile with a halo of neighbour texels, fetched through this cache. */
+  haloCache?: DecodedTileCache;
+}): GeoTiffRenderer["loadTileTextures"] {
+  return async (image, options) => {
+    const { data, width, height, halo, mask } = await fetchTilePixels(
+      image,
+      options,
+      haloCache,
+      samplesPerPixel,
+    );
+    const paddedWidth = width + 2 * halo;
+    const paddedHeight = height + 2 * halo;
 
     const texture = createTexture2D(options.gl, {
-      width,
-      height,
-      data: toGlView(array.data),
+      width: paddedWidth,
+      height: paddedHeight,
+      data: toGlView(data),
       format: textureFormat,
       linear: linearFilter,
     });
-    let byteLength = width * height * textureFormat.bytesPerPixel;
+    let byteLength = paddedWidth * paddedHeight * textureFormat.bytesPerPixel;
 
     let maskTexture: WebGLTexture | undefined;
     if (mask !== null) {
@@ -480,7 +578,7 @@ function tileTextureLoader({
       byteLength += width * height;
     }
 
-    return { texture, mask: maskTexture, width, height, byteLength };
+    return { texture, mask: maskTexture, width, height, halo, byteLength };
   };
 }
 
@@ -603,6 +701,11 @@ function createContourRenderer(
     }
   };
 
+  // Contours interpolate `value` manually, so each tile carries a halo of
+  // neighbour texels: without it the outer half texel clamps to the tile's
+  // own edge and every isoline breaks into a step at the seam.
+  const haloCache = new DecodedTileCache();
+
   const buildPipeline = (textures: GeoTiffTileTextures): RenderPipeline => {
     const pipeline: RenderPipeline = [
       {
@@ -614,6 +717,7 @@ function createContourRenderer(
           scale,
           offset,
           size: new Float32Array([textures.width, textures.height]),
+          halo: textures.halo,
         },
       },
     ];
@@ -640,10 +744,12 @@ function createContourRenderer(
       samplesPerPixel,
       textureFormat,
       linearFilter: false,
+      haloCache,
     }),
     buildPipeline,
     destroyTileTextures,
     destroy: (glContext) => {
+      haloCache.clear();
       if (isobandProps) {
         glContext.deleteTexture(isobandProps.colors.texture);
       }

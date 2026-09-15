@@ -26,10 +26,18 @@ export interface ValueTextureProps {
   /** @default 0 */
   offset?: number;
   /**
-   * Texture size in texels as `[width, height]`, for manual bilinear
-   * interpolation. Built once per tile; `getUniforms` runs every frame.
+   * Size of the tile's content in texels as `[width, height]`, excluding any
+   * halo, for manual bilinear interpolation. Built once per tile;
+   * `getUniforms` runs every frame.
    */
   size: Float32Array;
+  /**
+   * Texels of padding on every side of the content, filled from the
+   * neighbouring tiles: `0` or `1`. `uv` spans the content only; the halo
+   * lets the bilinear taps reach across a tile seam instead of clamping at it.
+   * @default 0
+   */
+  halo?: number;
 }
 
 const SAMPLER_TYPE: Record<ValueSamplerKind, string> = {
@@ -52,17 +60,21 @@ uniform int u_value_has_nodata;
 uniform float u_value_nodata;
 uniform float u_value_scale;
 uniform float u_value_offset;
-uniform vec2 u_value_size;`,
+uniform vec2 u_value_size;
+uniform int u_value_halo;`,
     // Manual bilinear interpolation between the four texel centres around
     // `uv`, so integer textures (which cannot be LINEAR-filtered) and float
     // textures without OES_texture_float_linear behave alike, and nodata is
     // exact: any contributing nodata or NaN texel invalidates the pixel
-    // instead of bleeding into it.
+    // instead of bleeding into it. `uv` maps onto the content; the halo
+    // shifts texel indices into the padded texture, so the outer half texel
+    // of the content interpolates towards the neighbouring tile's edge
+    // rather than clamping to its own.
     fsColor: `  {
-    vec2 p = uv * u_value_size - 0.5;
+    vec2 p = uv * u_value_size - 0.5 + float(u_value_halo);
     vec2 p0 = floor(p);
     vec2 f = p - p0;
-    ivec2 maxTexel = ivec2(u_value_size) - 1;
+    ivec2 maxTexel = ivec2(u_value_size) + 2 * u_value_halo - 1;
     ivec2 i00 = clamp(ivec2(p0), ivec2(0), maxTexel);
     ivec2 i11 = clamp(ivec2(p0) + 1, ivec2(0), maxTexel);
     float v00 = float(texelFetch(u_value_texture, ivec2(i00.x, i00.y), 0)[u_value_band]);
@@ -89,6 +101,10 @@ uniform vec2 u_value_size;`,
       if (!Number.isInteger(props.band) || props.band < 0 || props.band > 3) {
         throw new RangeError(`band must be 0–3, got ${props.band}`);
       }
+      const halo = props.halo ?? 0;
+      if (halo !== 0 && halo !== 1) {
+        throw new RangeError(`halo must be 0 or 1, got ${halo}`);
+      }
       return {
         textures: { u_value_texture: props.texture },
         uniforms: {
@@ -98,6 +114,7 @@ uniform vec2 u_value_size;`,
           u_value_scale: props.scale ?? 1,
           u_value_offset: props.offset ?? 0,
           u_value_size: props.size,
+          u_value_halo: halo,
         },
       };
     },
