@@ -37,8 +37,10 @@ export type Mat4 = Float64Array;
  *   mercY   = 1 - c.y / 512
  *   metres  = c.z / unitsPerMeter
  * ```
+ *
+ * Exported for the headless tile camera, which builds its own `mainMatrix`.
  */
-function commonSpaceToClip(
+export function commonSpaceToClip(
   mainMatrix: ArrayLike<number>,
   unitsPerMeter: number,
 ): Mat4 {

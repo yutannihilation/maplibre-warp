@@ -25,6 +25,7 @@ import type {
   BandColors,
   ContourBand,
   ContourLineProps,
+  DemEncoding,
   IsobandProps,
   PackedThresholds,
   ValueGradientProps,
@@ -40,6 +41,7 @@ import {
   ContourLine,
   CreateTexture,
   colorToVec4,
+  DemEncode,
   FilterNoDataVal,
   gradientColorImage,
   Isoband,
@@ -49,6 +51,7 @@ import {
   resolveGradientStops,
   ValueGradient,
   ValueTexture,
+  validateDemEncoding,
   WhiteIsZero,
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 
@@ -669,23 +672,31 @@ function destroyTileTextures(
 }
 
 /**
- * Contour renderer: `ValueTexture` seed → `Isoband`, `ValueGradient` or
- * `ClearColor` → `ContourLine`, over any sample format the texture table
- * knows.
+ * The value-reading front of a scalar pipeline: how a tile's samples are
+ * uploaded, and the modules that seed `value`/`valid` from them.
+ *
+ * Shared by every renderer that works on a sample rather than a colour: the
+ * contour renderer paints it, the DEM renderer packs it.
  */
-function createContourRenderer(
+interface ValueSeed {
+  loadTileTextures: GeoTiffRenderer["loadTileTextures"];
+  /** The seed module for a tile, followed by the mask when it has one. */
+  seedModules(textures: GeoTiffTileTextures): RenderPipeline;
+  /** Release the shared decoded-tile cache. */
+  destroy(): void;
+}
+
+/**
+ * Build the value seed for `band`, over any sample format the texture table
+ * knows. `band` must already be validated against the raster.
+ */
+function createValueSeed(
   geotiff: GeoTIFF,
   gl: WebGL2RenderingContext,
-  contour: ContourRenderOptions,
-): GeoTiffRenderer {
+  band: number,
+): ValueSeed {
   const { bitsPerSample, sampleFormat, samplesPerPixel, nodata } =
     geotiff.cachedTags;
-  // Everything a tile's props need is resolved once here: `buildPipeline`
-  // runs per tile and `getUniforms` per tile per frame, so no colour parsing
-  // or array allocation may live there.
-  const resolved = resolveContourOptions(contour, samplesPerPixel);
-  const { band } = resolved;
-
   const uploadedSamples = samplesPerPixel === 3 ? 4 : samplesPerPixel;
   const textureFormat = inferTextureFormat(
     gl,
@@ -702,6 +713,113 @@ function createContourRenderer(
   const scale = denorm * (geotiff.scales[band] ?? 1);
   const offset = geotiff.offsets[band] ?? 0;
   const nodataSampled = nodata === null ? null : nodata / denorm;
+
+  // The value is interpolated manually, so each tile carries a halo of
+  // neighbour texels: without it the outer half texel clamps to the tile's
+  // own edge and every isoline (or terrain slope) breaks into a step at the
+  // seam.
+  const haloCache = new DecodedTileCache();
+
+  return {
+    // Filtering is irrelevant: the seed interpolates with texelFetch.
+    loadTileTextures: tileTextureLoader({
+      samplesPerPixel,
+      textureFormat,
+      linearFilter: false,
+      haloCache,
+    }),
+    seedModules: (textures) => {
+      const pipeline: RenderPipeline = [
+        {
+          module: seed,
+          props: {
+            texture: { texture: textures.texture, target: gl.TEXTURE_2D },
+            band,
+            nodata: nodataSampled,
+            scale,
+            offset,
+            size: new Float32Array([textures.width, textures.height]),
+            halo: textures.halo,
+          },
+        },
+      ];
+      if (textures.mask) {
+        pipeline.push({
+          module: MaskTexture,
+          props: { mask: { texture: textures.mask, target: gl.TEXTURE_2D } },
+        });
+      }
+      return pipeline;
+    },
+    destroy: () => haloCache.clear(),
+  };
+}
+
+/** How a scalar band is packed into `raster-dem` RGB. */
+export interface DemRenderOptions {
+  /** Band to read. @default 0 */
+  band?: number;
+  /** @default "terrarium" */
+  encoding?: DemEncoding;
+  /** Metres written where the raster has no data. @default 0 */
+  fillValue?: number;
+}
+
+/**
+ * DEM renderer: `ValueTexture` seed → `DemEncode`. The output is data for
+ * MapLibre's `raster-dem` decoder, not an image: opaque, unblended, with the
+ * elevation packed into RGB per {@link DemEncoding}.
+ */
+export function createDemRenderer(
+  geotiff: GeoTIFF,
+  gl: WebGL2RenderingContext,
+  options: DemRenderOptions = {},
+): GeoTiffRenderer {
+  const { samplesPerPixel } = geotiff.cachedTags;
+  const band = options.band ?? 0;
+  if (!Number.isInteger(band) || band < 0 || band >= samplesPerPixel) {
+    throw new RangeError(
+      `band must be an integer in [0, ${samplesPerPixel}), got ${band}`,
+    );
+  }
+  const encoding = validateDemEncoding(options.encoding ?? "terrarium");
+  const fillValue = options.fillValue ?? 0;
+  if (!Number.isFinite(fillValue)) {
+    throw new RangeError(`fillValue must be finite, got ${fillValue}`);
+  }
+
+  const seed = createValueSeed(geotiff, gl, band);
+  // One instance shared by every tile: `getUniforms` reads it per tile.
+  const encode: RenderPipeline[number] = {
+    module: DemEncode,
+    props: { encoding, fillValue },
+  };
+
+  return {
+    loadTileTextures: seed.loadTileTextures,
+    buildPipeline: (textures) => [...seed.seedModules(textures), encode],
+    destroyTileTextures,
+    destroy: () => seed.destroy(),
+  };
+}
+
+/**
+ * Contour renderer: `ValueTexture` seed → `Isoband`, `ValueGradient` or
+ * `ClearColor` → `ContourLine`, over any sample format the texture table
+ * knows.
+ */
+function createContourRenderer(
+  geotiff: GeoTIFF,
+  gl: WebGL2RenderingContext,
+  contour: ContourRenderOptions,
+): GeoTiffRenderer {
+  const { samplesPerPixel } = geotiff.cachedTags;
+  // Everything a tile's props need is resolved once here: `buildPipeline`
+  // runs per tile and `getUniforms` per tile per frame, so no colour parsing
+  // or array allocation may live there.
+  const resolved = resolveContourOptions(contour, samplesPerPixel);
+  const { band } = resolved;
+  const seed = createValueSeed(geotiff, gl, band);
 
   const colorTexture = (
     glContext: WebGL2RenderingContext,
@@ -807,26 +925,7 @@ function createContourRenderer(
   const live = new Map<GeoTiffTileTextures, RenderPipeline>();
 
   const modulesFor = (textures: GeoTiffTileTextures): RenderPipeline => {
-    const pipeline: RenderPipeline = [
-      {
-        module: seed,
-        props: {
-          texture: { texture: textures.texture, target: gl.TEXTURE_2D },
-          band,
-          nodata: nodataSampled,
-          scale,
-          offset,
-          size: new Float32Array([textures.width, textures.height]),
-          halo: textures.halo,
-        },
-      },
-    ];
-    if (textures.mask) {
-      pipeline.push({
-        module: MaskTexture,
-        props: { mask: { texture: textures.mask, target: gl.TEXTURE_2D } },
-      });
-    }
+    const pipeline = seed.seedModules(textures);
     pipeline.push(style.fill);
     if (style.lines) {
       pipeline.push({ module: ContourLine, props: style.lines });
@@ -863,26 +962,15 @@ function createContourRenderer(
     }
   };
 
-  // Contours interpolate `value` manually, so each tile carries a halo of
-  // neighbour texels: without it the outer half texel clamps to the tile's
-  // own edge and every isoline breaks into a step at the seam.
-  const haloCache = new DecodedTileCache();
-
   return {
-    // Filtering is irrelevant: the seed interpolates with texelFetch.
-    loadTileTextures: tileTextureLoader({
-      samplesPerPixel,
-      textureFormat,
-      linearFilter: false,
-      haloCache,
-    }),
+    loadTileTextures: seed.loadTileTextures,
     buildPipeline,
     destroyTileTextures: (glContext, textures) => {
       live.delete(textures);
       destroyTileTextures(glContext, textures);
     },
     destroy: (glContext) => {
-      haloCache.clear();
+      seed.destroy();
       live.clear();
       destroyStyle(glContext, style);
     },

@@ -1,6 +1,26 @@
+export type { DrawablePayload, ShaderData } from "./draw.js";
+export { drawTiles } from "./draw.js";
 export { splitFloat64, splitFloat64Array } from "./fp64.js";
 export type { SpherePoint } from "./globe.js";
 export { GLOBE_RADIUS, horizonPlane, sphereFromMercator } from "./globe.js";
+export type { ClearColor } from "./headless/headless-renderer.js";
+export {
+  HEADLESS_MERCATOR_PRELUDE,
+  HEADLESS_SHADER_DATA,
+  HeadlessTileRenderer,
+} from "./headless/headless-renderer.js";
+export type {
+  AcquiredTiles,
+  TilePayloadCacheOptions,
+} from "./headless/payload-cache.js";
+export { TilePayloadCache } from "./headless/payload-cache.js";
+export type { TileFrame } from "./headless/tile-viewport.js";
+export {
+  createTileFrame,
+  mercatorTileBounds,
+  tileClipMatrix,
+  validateTileIndex,
+} from "./headless/tile-viewport.js";
 export {
   COMMON_SPACE_SIZE,
   commonSpaceFromLngLat,
@@ -8,6 +28,7 @@ export {
   EPSG_3857_CIRCUMFERENCE,
   epsg3857FromMercator,
   lngLatFromCommonSpace,
+  lngLatFromMercator,
   MAX_WEB_MERCATOR_LAT,
   mercatorFromEPSG3857,
   mercatorFromLngLat,
@@ -27,6 +48,7 @@ export type {
 export {
   globeFrameUniforms,
   mercatorFrameUniforms,
+  mercatorFrameUniformsAt,
   RasterCustomLayer,
   translateMatrix,
 } from "./raster-custom-layer.js";
@@ -81,6 +103,15 @@ export type {
 export type { CornerLatitudes } from "./tileset/web-mercator-clamp.js";
 export { createInitialWebMercatorTriangulation } from "./tileset/web-mercator-clamp.js";
 export {
+  abortError,
+  DEFAULT_MAX_CACHE_BYTE_SIZE,
+  DEFAULT_MAX_CACHE_SIZE,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_RETRY_BASE_DELAY,
+  sleep,
+} from "./util.js";
+export {
+  commonSpaceToClip,
   createRasterViewport,
   drawingBufferRatio,
   extractFrustumPlanes,

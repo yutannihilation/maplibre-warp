@@ -1,4 +1,5 @@
 import type {
+  COGDemSourceProps,
   ContourFill,
   ContourRenderOptions,
 } from "@yutannihilation/maplibre-warp-geotiff";
@@ -68,6 +69,11 @@ export interface Dataset {
   note: string;
   /** Render as shader contours instead of imagery. */
   contour?: ContourSpec;
+  /**
+   * Elevation in metres: offer it as a `raster-dem` source too, with these
+   * options (tile size, encoding).
+   */
+  dem?: Pick<COGDemSourceProps, "tileSize" | "encoding" | "fillValue">;
 }
 
 /** Fewest bands the UI offers: one threshold plus the open upper band. */
@@ -150,6 +156,8 @@ export const DATASETS: Dataset[] = [
     center: [7.66, 46.4],
     zoom: 14,
     note: "2 m DEM in LV95; bands every 50 m and lines drawn in the fragment shader.",
+    // The defaults: 512 px terrarium tiles.
+    dem: {},
     contour: {
       // 600–2600 m in 41 bands is a threshold every 50 m.
       domain: [600, 2600],
@@ -170,6 +178,8 @@ export const DATASETS: Dataset[] = [
     center: [-121.76, 46.85],
     zoom: 10,
     note: "30 m DEM in geographic coordinates (Mount Rainier); bands every 200 m.",
+    // The other tile size and encoding, so both paths reach MapLibre.
+    dem: { tileSize: 256, encoding: "mapbox" },
     contour: {
       // 22 thresholds every 200 m plus the open band below 200 m.
       domain: [200, 4400],

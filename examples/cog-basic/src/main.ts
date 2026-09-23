@@ -1,4 +1,9 @@
-import { COGLayer } from "@yutannihilation/maplibre-warp-geotiff";
+import {
+  COG_DEM_PROTOCOL,
+  COGDemSource,
+  COGLayer,
+  cogDemProtocol,
+} from "@yutannihilation/maplibre-warp-geotiff";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
@@ -19,8 +24,12 @@ import {
 } from "./datasets.js";
 
 maplibregl.setWorkerUrl(workerUrl);
+// Once per page: every COGDemSource answers under this scheme.
+maplibregl.addProtocol(COG_DEM_PROTOCOL, cogDemProtocol);
 
 const LAYER_ID = "cog";
+const DEM_SOURCE_ID = "cog-dem";
+const HILLSHADE_LAYER_ID = "cog-hillshade";
 
 const statusEl = document.getElementById("status") as HTMLDivElement;
 const legendEl = document.getElementById("legend") as HTMLDivElement;
@@ -35,6 +44,11 @@ const schemeEl = document.getElementById("scheme") as HTMLSelectElement;
 const binsEl = document.getElementById("bins") as HTMLInputElement;
 const binsValueEl = document.getElementById("bins-value") as HTMLOutputElement;
 const opacityEl = document.getElementById("opacity") as HTMLInputElement;
+const terrainControlsEl = document.getElementById(
+  "terrain-controls",
+) as HTMLFieldSetElement;
+const hillshadeEl = document.getElementById("hillshade") as HTMLInputElement;
+const terrainEl = document.getElementById("terrain") as HTMLInputElement;
 const opacityValueEl = document.getElementById(
   "opacity-value",
 ) as HTMLOutputElement;
@@ -78,6 +92,18 @@ function firstSymbolLayerId(): string | undefined {
 
 let current: COGLayer | undefined;
 let currentDataset: Dataset | undefined;
+/** The DEM source for `currentDataset`, once a DEM control is on. */
+let dem: COGDemSource | undefined;
+
+/**
+ * The status box is two independent parts — the layer's header report and
+ * the DEM source's — written by two callbacks that race on the same header;
+ * assembling it from state means neither can erase the other.
+ */
+const status = { layer: "", dem: "" };
+function renderStatus(): void {
+  statusEl.textContent = [status.layer, status.dem].filter(Boolean).join("\n");
+}
 /** Once the user has picked a scheme it carries across datasets. */
 let schemeChosen = false;
 
@@ -114,10 +140,12 @@ function contourFromControls(dataset: Dataset) {
 }
 
 function showDataset(dataset: Dataset): void {
+  teardownDem();
   if (map.getLayer(LAYER_ID)) {
     map.removeLayer(LAYER_ID);
   }
   currentDataset = dataset;
+  terrainControlsEl.hidden = !dataset.dem;
 
   // A new dataset brings its own bin count and line default and, until the
   // user picks one, its own scheme; the fill mode is the user's and carries
@@ -132,7 +160,9 @@ function showDataset(dataset: Dataset): void {
     }
   }
 
-  statusEl.textContent = `${dataset.note}\nopening COG…`;
+  status.layer = `${dataset.note}\nopening COG…`;
+  status.dem = "";
+  renderStatus();
 
   const started = performance.now();
   current = new COGLayer({
@@ -142,13 +172,14 @@ function showDataset(dataset: Dataset): void {
     contour: contourFromControls(dataset),
     onGeoTIFFLoad: (geotiff, { projection, geographicBounds }) => {
       const headerMs = Math.round(performance.now() - started);
-      statusEl.textContent = [
+      status.layer = [
         dataset.note,
         `CRS: ${projection.title || projection.projName || geotiff.crs}`,
         `size: ${geotiff.width} × ${geotiff.height}, ${geotiff.overviews.length} overviews`,
         `bands: ${geotiff.count}, nodata: ${geotiff.nodata ?? "none"}`,
         `header read in ${headerMs} ms`,
       ].join("\n");
+      renderStatus();
       map.fitBounds(
         [
           [geographicBounds.west, geographicBounds.south],
@@ -161,6 +192,103 @@ function showDataset(dataset: Dataset): void {
 
   map.addLayer(current, firstSymbolLayerId());
   renderLegend(current);
+  if (dataset.dem) {
+    void applyTerrainControls();
+  }
+}
+
+/**
+ * Remove everything the DEM controls put on the map, in the order MapLibre
+ * insists on — terrain off, then the layer, then the source — and free the
+ * source itself. Only for a dataset change: the source is expensive to
+ * rebuild, so toggling the boxes off keeps it (see `applyTerrainControls`).
+ */
+function teardownDem(): void {
+  if (map.getTerrain()) {
+    map.setTerrain(null);
+  }
+  if (map.getLayer(HILLSHADE_LAYER_ID)) {
+    map.removeLayer(HILLSHADE_LAYER_ID);
+  }
+  if (map.getSource(DEM_SOURCE_ID)) {
+    map.removeSource(DEM_SOURCE_ID);
+  }
+  dem?.destroy();
+  dem = undefined;
+}
+
+/**
+ * Bring the map in line with the two DEM checkboxes. The source is created
+ * and opened the first time either box is on and then kept, header, GL
+ * context and tile cache included, until the dataset changes; only the
+ * hillshade layer and the terrain follow the boxes. The COG is read a
+ * second time here — the visible layer and the DEM source each hold their
+ * own tiles.
+ */
+async function applyTerrainControls(): Promise<void> {
+  const dataset = currentDataset;
+  if (!dataset?.dem) {
+    return;
+  }
+  const wanted = hillshadeEl.checked || terrainEl.checked;
+  if (!dem) {
+    if (!wanted) {
+      return;
+    }
+    const source = new COGDemSource({
+      id: DEM_SOURCE_ID,
+      geotiff: dataset.url,
+      ...dataset.dem,
+    });
+    dem = source;
+    try {
+      const spec = await source.open();
+      // The dataset changed while the header was being read.
+      if (dem !== source) {
+        source.destroy();
+        return;
+      }
+      map.addSource(DEM_SOURCE_ID, spec);
+      status.dem = `DEM source: ${spec.encoding}, ${spec.tileSize} px tiles, maxzoom ${spec.maxzoom}`;
+      renderStatus();
+    } catch (error) {
+      console.error("[cog-dem] failed to open", error);
+      status.dem = `DEM source failed: ${String(error)}`;
+      renderStatus();
+      if (dem === source) {
+        source.destroy();
+        dem = undefined;
+      }
+      return;
+    }
+  }
+  if (!map.getSource(DEM_SOURCE_ID)) {
+    // Still opening on another call; that call finishes the job.
+    return;
+  }
+
+  const hasHillshade = Boolean(map.getLayer(HILLSHADE_LAYER_ID));
+  if (hillshadeEl.checked && !hasHillshade) {
+    // Under the COG layer, so contour bands tint the relief.
+    map.addLayer(
+      {
+        id: HILLSHADE_LAYER_ID,
+        type: "hillshade",
+        source: DEM_SOURCE_ID,
+        paint: { "hillshade-exaggeration": 0.6 },
+      },
+      map.getLayer(LAYER_ID) ? LAYER_ID : firstSymbolLayerId(),
+    );
+  } else if (!hillshadeEl.checked && hasHillshade) {
+    map.removeLayer(HILLSHADE_LAYER_ID);
+  }
+
+  const hasTerrain = Boolean(map.getTerrain());
+  if (terrainEl.checked && !hasTerrain) {
+    map.setTerrain({ source: DEM_SOURCE_ID, exaggeration: 1 });
+  } else if (!terrainEl.checked && hasTerrain) {
+    map.setTerrain(null);
+  }
 }
 
 /**
@@ -284,6 +412,8 @@ binsEl.addEventListener("input", restyleContours);
 fillEl.addEventListener("change", restyleContours);
 linesEl.addEventListener("change", restyleContours);
 opacityEl.addEventListener("input", applyOpacity);
+hillshadeEl.addEventListener("change", () => void applyTerrainControls());
+terrainEl.addEventListener("change", () => void applyTerrainControls());
 
 // Surface WebGL errors in the example rather than letting them scroll past.
 map.on("error", (event: { error: unknown }) => {
@@ -293,7 +423,11 @@ map.on("error", (event: { error: unknown }) => {
 declare global {
   interface Window {
     /** Exposed for browser-driven verification. */
-    __cog: { map: maplibregl.Map; layer: () => COGLayer | undefined };
+    __cog: {
+      map: maplibregl.Map;
+      layer: () => COGLayer | undefined;
+      dem: () => COGDemSource | undefined;
+    };
   }
 }
-window.__cog = { map, layer: () => current };
+window.__cog = { map, layer: () => current, dem: () => dem };

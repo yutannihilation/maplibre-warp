@@ -120,6 +120,17 @@ export function mercatorFromLngLat(lng: number, lat: number): Point {
 }
 
 /**
+ * Convert MapLibre mercator `[0, 1]` (Y south-down) back to WGS84 lng/lat.
+ *
+ * The inverse of {@link mercatorFromLngLat} within the Web Mercator band.
+ */
+export function lngLatFromMercator([mx, my]: Point): Point {
+  const lng = mx * 360 - 180;
+  const phi = 2 * Math.atan(Math.exp((0.5 - my) * 2 * Math.PI)) - Math.PI / 2;
+  return [lng, (phi * 180) / Math.PI];
+}
+
+/**
  * Convert WGS84 lng/lat (degrees) to common space `[0, 512]`, Y north-up.
  *
  * This is `@math.gl/web-mercator`'s `lngLatToWorld` except that it **clamps**

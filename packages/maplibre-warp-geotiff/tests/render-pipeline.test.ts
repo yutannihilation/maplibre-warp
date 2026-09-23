@@ -3,6 +3,7 @@ import type { GeoTIFF } from "@developmentseed/geotiff";
 import { describe, expect, it, vi } from "vitest";
 import type { GeoTiffTileTextures } from "../src/render-pipeline.js";
 import {
+  createDemRenderer,
   inferRenderPipeline,
   resolveContourBands,
   resolveContourOptions,
@@ -757,5 +758,58 @@ describe("contour tile loading", () => {
     );
     expect(tile.halo).toBe(0);
     expect(uploads[0]).toMatchObject({ width: 2, height: 2 });
+  });
+});
+
+describe("createDemRenderer", () => {
+  it("builds value → dem-encode, with the mask in between when present", () => {
+    const renderer = createDemRenderer(
+      fakeGeoTiff({
+        sampleFormat: SampleFormat.Float,
+        bitsPerSample: 32,
+        nodata: -9999,
+      }),
+      stubGl(),
+    );
+    expect(moduleNames(renderer.buildPipeline(textures))).toEqual([
+      "value-texture-float",
+      "dem-encode",
+    ]);
+    expect(
+      moduleNames(
+        renderer.buildPipeline({ ...textures, mask: {} as WebGLTexture }),
+      ),
+    ).toEqual(["value-texture-float", "mask-texture", "dem-encode"]);
+  });
+
+  it("passes the encoding and fill value through as uniforms", () => {
+    const renderer = createDemRenderer(
+      fakeGeoTiff({ sampleFormat: SampleFormat.Int, bitsPerSample: 16 }),
+      stubGl(),
+      { encoding: "mapbox", fillValue: -1 },
+    );
+    const pipeline = renderer.buildPipeline(textures);
+    expect(pipeline[0]!.module.name).toBe("value-texture-int");
+    const encode = pipeline[pipeline.length - 1]!;
+    expect(encode.module.getUniforms!(encode.props)).toEqual({
+      uniforms: {
+        u_dem_step: 10,
+        u_dem_base_shift: 10000,
+        u_dem_fill_value: -1,
+      },
+    });
+  });
+
+  it("rejects a band the raster does not have and a non-finite fill", () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Float,
+      bitsPerSample: 32,
+    });
+    expect(() => createDemRenderer(geotiff, stubGl(), { band: 1 })).toThrow(
+      RangeError,
+    );
+    expect(() =>
+      createDemRenderer(geotiff, stubGl(), { fillValue: Infinity }),
+    ).toThrow(RangeError);
   });
 });
