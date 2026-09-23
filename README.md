@@ -44,7 +44,7 @@ and the data reaches the GPU unquantised.
 | Package | What it is |
 | --- | --- |
 | `@yutannihilation/maplibre-warp-raster` | Renderer core: the custom-layer base class, tile scheduler, warp mesh, shader assembly and program cache. Source-format agnostic. |
-| `@yutannihilation/maplibre-warp-geotiff` | COG specifics: opening the file, building the tile pyramid, inferring a render pipeline from TIFF tags, texture formats. |
+| `@yutannihilation/maplibre-warp-geotiff` | COG specifics: opening the file, building the tile pyramid, inferring a render pipeline from TIFF tags, texture formats. Also `COGDemSource`, which serves a COG DEM as a MapLibre `raster-dem` source. |
 
 `examples/cog-basic` is a Vite app with six datasets that exercise different
 paths: swisstopo PK1000 (EPSG:2056 oblique Mercator, RGB), NLCD land cover
@@ -155,6 +155,62 @@ is validated in the `COGLayer` constructor so a misconfiguration fails before
 any network request. Output is raster: no labels and no picking. See
 `docs/adr/0003-shader-contours.md`.
 
+### As a `raster-dem` source (hillshade, terrain)
+
+MapLibre's terrain, `hillshade` and `color-relief` need a `raster-dem`
+source: square EPSG:3857 XYZ tiles with the elevation packed into RGB.
+`COGDemSource` produces those in the page from a COG in any CRS, through a
+custom protocol, so a native-CRS DEM needs no tiling pipeline:
+
+```ts
+import {
+  COG_DEM_PROTOCOL,
+  COGDemSource,
+  cogDemProtocol,
+} from "@yutannihilation/maplibre-warp-geotiff";
+
+// Once per page.
+maplibregl.addProtocol(COG_DEM_PROTOCOL, cogDemProtocol);
+
+const dem = new COGDemSource({
+  id: "dem", // tiles are requested as cog-dem://dem/{z}/{x}/{y}
+  geotiff: "https://example.com/dem-in-any-crs.tif",
+  encoding: "terrarium", // the default; "mapbox" also works
+  tileSize: 512,
+  fillValue: 0, // metres written where the raster has no data
+});
+map.addSource("dem", await dem.open()); // { type: "raster-dem", bounds, maxzoom, … }
+map.addLayer({ id: "hills", type: "hillshade", source: "dem" });
+map.setTerrain({ source: "dem", exaggeration: 1 });
+
+// Later: map.setTerrain(null); map.removeLayer("hills"); map.removeSource("dem");
+dem.destroy();
+```
+
+Each requested tile is warped the same way the layer warps the screen — the
+COG tiles that cover it are selected by the same traversal, drawn through the
+same mesh and value-reading shader — but into an `OffscreenCanvas` the source
+owns, with an orthographic camera over the tile. A terminal shader module
+packs the elevation into three bytes (MapLibre's `DEMData` holds RGBA and
+unpacks it with a fixed linear formula; there is no float path) and the
+canvas is handed to MapLibre as an `ImageBitmap`, with no PNG encoding or
+CPU resampling in between. The source specification carries the dataset's
+`bounds` and a `maxzoom` at which one output pixel reaches one source pixel,
+so MapLibre requests nothing outside the data and overzooms beyond the
+native resolution itself.
+
+Things to know:
+
+- `raster-dem` has no notion of missing data: nodata, masked texels and
+  everything outside the dataset read as `fillValue`, which shows up as a
+  cliff at the data's edge.
+- The source fetches and decodes the COG independently of any `COGLayer`
+  drawing the same file, so both on one map hold two copies of the tiles.
+- A `COGLayer` on a terrain map still draws flat (see below); hillshade,
+  colour relief and MapLibre's own layers drape.
+- Needs `OffscreenCanvas` with WebGL2 (every current browser). The source
+  refuses to open without it rather than falling back to the CPU.
+
 ### Globe
 
 The layer follows whichever projection the map is rendering with, read every
@@ -230,7 +286,9 @@ loading, never per frame.
   reads them through typed samplers.
 - **No terrain draping.** MapLibre renders custom layers directly rather than
   through its render-to-texture pass, so with `map.setTerrain` active the raster
-  stays flat at z = 0. Same limitation as deck.gl's interleaved mode.
+  stays flat at z = 0. Same limitation as deck.gl's interleaved mode. The COG
+  can still *be* the terrain, through `COGDemSource`; it just cannot drape
+  on it.
 - **Primary world only.** Panning past the antimeridian will not draw a wrapped
   copy of the raster.
 - **Nodata edges.** Nodata is a `discard` on an exact value comparison. With

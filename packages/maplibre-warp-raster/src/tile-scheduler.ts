@@ -13,6 +13,12 @@ import type { RasterTilesetDescriptor } from "./tileset/tileset-interface.js";
 import { getTileIndices } from "./tileset/traversal.js";
 import type { Bounds, TileIndex, ZRange } from "./tileset/types.js";
 import type { RasterViewport } from "./tileset/viewport.js";
+import {
+  DEFAULT_MAX_CACHE_BYTE_SIZE,
+  DEFAULT_MAX_CACHE_SIZE,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_RETRY_BASE_DELAY,
+} from "./util.js";
 
 export type TileState = "loading" | "loaded" | "error";
 
@@ -160,8 +166,6 @@ export interface TileSchedulerUpdateOptions {
   suspendLoads?: boolean;
 }
 
-const DEFAULT_MAX_CACHE_BYTE_SIZE = 256 * 1024 * 1024;
-const DEFAULT_MAX_CACHE_SIZE = 512;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 6;
 /**
  * How many levels finer than a selected tile loaded descendants may be and
@@ -171,8 +175,6 @@ const DEFAULT_MAX_CONCURRENT_REQUESTS = 6;
  */
 export const MAX_STAND_IN_DEPTH = 2;
 const DEFAULT_LOD_BIAS = 0;
-const DEFAULT_RETRY_BASE_DELAY = 1000;
-const DEFAULT_MAX_RETRIES = 3;
 
 /** A tile the layer should draw this frame, in painter order. */
 export interface DrawableTile<PayloadT> {

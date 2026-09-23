@@ -259,3 +259,16 @@ export {
   resolveGradientStops,
   validateThresholds,
 } from "./contour-bands.js";
+export type {
+  DemEncodeProps,
+  DemEncoding,
+  DemEncodingFactors,
+} from "./dem-encode.js";
+export {
+  DEM_ENCODINGS,
+  DemEncode,
+  decodeDem,
+  demClearColor,
+  encodeDem,
+  validateDemEncoding,
+} from "./dem-encode.js";

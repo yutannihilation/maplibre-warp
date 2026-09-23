@@ -8,21 +8,22 @@ import type {
   Map as MapLibreMap,
 } from "maplibre-gl";
 
+import { drawTiles } from "./draw.js";
 import { splitFloat64 } from "./fp64.js";
 import { mercatorFromLngLat } from "./mercator.js";
 import type { GpuMesh } from "./mesh.js";
 import { projectionFromVariant } from "./projection.js";
 import type { RenderPipeline, UniformValue } from "./shader/module.js";
-import { collectBindings } from "./shader/module.js";
 import { ProgramCache } from "./shader/program.js";
-import type { DrawableTile } from "./tile-scheduler.js";
 import { TileScheduler } from "./tile-scheduler.js";
 import type { RasterTilesetDescriptor } from "./tileset/tileset-interface.js";
-import type { Bounds, TileIndex, ZRange } from "./tileset/types.js";
+import type { Bounds, Point, TileIndex, ZRange } from "./tileset/types.js";
+import {
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_RETRY_BASE_DELAY,
+  sleep,
+} from "./util.js";
 import { createRasterViewport } from "./viewport-shim.js";
-
-const DEFAULT_RETRY_BASE_DELAY = 1000;
-const DEFAULT_MAX_RETRIES = 3;
 
 /** Everything the layer needs to draw one loaded tile. */
 export interface RasterTilePayload {
@@ -362,49 +363,13 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
         : mercatorFrameUniforms(map, args);
     frameUniforms.u_opacity = this._opacity;
 
-    this.drawTiles(gl, args, drawList, frameUniforms);
-  }
-
-  private drawTiles(
-    gl: WebGL2RenderingContext,
-    args: CustomRenderMethodInput,
-    drawList: DrawableTile<RasterTilePayload>[],
-    frameUniforms: Record<string, UniformValue>,
-  ): void {
-    const programs = this.programs!;
-    let currentProgram: WebGLProgram | null = null;
-
-    for (const { payload } of drawList) {
-      const program = programs.get(args.shaderData, payload.pipeline);
-
-      if (program.program !== currentProgram) {
-        gl.useProgram(program.program);
-        currentProgram = program.program;
-        for (const [name, value] of Object.entries(frameUniforms)) {
-          program.setUniform(name, value);
-        }
-      }
-
-      program.bind(collectBindings(payload.pipeline));
-
-      gl.bindVertexArray(payload.mesh.vao);
-      gl.drawElements(
-        gl.TRIANGLES,
-        payload.mesh.indexCount,
-        gl.UNSIGNED_INT,
-        0,
-      );
-    }
-    // Leave no VAO bound: `setCustomLayerDefaults` unbinds it for the *next*
-    // custom layer, but MapLibre's own layers in this frame run first, and a
-    // stray binding would capture their `vertexAttribPointer` calls.
-    gl.bindVertexArray(null);
+    drawTiles(gl, programs, args.shaderData, drawList, frameUniforms);
   }
 }
 
 /**
  * Per-frame uniforms for the mercator vertex shader: the relative-to-centre
- * scheme described in `shader/sources.ts`.
+ * scheme described in `shader/sources.ts`, with the map centre as origin.
  *
  * Exported for unit testing.
  */
@@ -413,15 +378,25 @@ export function mercatorFrameUniforms(
   args: CustomRenderMethodInput,
 ): Record<string, UniformValue> {
   const centre = map.getCenter();
-  const origin = mercatorFromLngLat(centre.lng, centre.lat);
+  return mercatorFrameUniformsAt(
+    args.defaultProjectionData.mainMatrix,
+    mercatorFromLngLat(centre.lng, centre.lat),
+  );
+}
+
+/**
+ * The relative-to-centre uniforms for an arbitrary mercator → clip
+ * `mainMatrix` and origin `O` in mercator `[0, 1]`: the matrix folded with
+ * `translate(O)` in float64, and `O` split into float32 halves.
+ */
+export function mercatorFrameUniformsAt(
+  mainMatrix: ArrayLike<number>,
+  origin: Point,
+): Record<string, UniformValue> {
   const [originXHigh, originXLow] = splitFloat64(origin[0]);
   const [originYHigh, originYLow] = splitFloat64(origin[1]);
   return {
-    u_projection_matrix: translateMatrix(
-      args.defaultProjectionData.mainMatrix,
-      origin[0],
-      origin[1],
-    ),
+    u_projection_matrix: translateMatrix(mainMatrix, origin[0], origin[1]),
     u_origin_high: new Float32Array([originXHigh, originYHigh]),
     u_origin_low: new Float32Array([originXLow, originYLow]),
   };
@@ -458,31 +433,6 @@ function validateOpacity(opacity: number): number {
     throw new RangeError(`opacity must be a number in [0, 1], got ${opacity}`);
   }
   return opacity;
-}
-
-/**
- * Wait `ms`, or resolve early if `signal` aborts.
- *
- * Resolving rather than rejecting on abort keeps the retry loop's control flow
- * in one place: the caller re-checks `signal.aborted` and returns.
- */
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      resolve();
-    };
-    timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 /**

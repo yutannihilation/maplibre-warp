@@ -35,13 +35,13 @@
         width: 100%;
         margin-bottom: 8px;
       }
-      #contour-controls {
+      #panel fieldset {
         margin: 0 0 8px;
         padding: 6px 8px 2px;
         border: 1px solid rgba(0, 0, 0, 0.15);
         border-radius: 4px;
       }
-      #contour-controls legend {
+      #panel fieldset legend {
         padding: 0 4px;
         font-weight: 600;
       }
@@ -55,11 +55,11 @@
         font-weight: 400;
         font-variant-numeric: tabular-nums;
       }
-      #contour-controls label.check {
+      #panel fieldset label.check {
         font-weight: 400;
         margin: 0 0 8px;
       }
-      #contour-controls label.check input {
+      #panel fieldset label.check input {
         margin: 0 6px 0 0;
         vertical-align: -1px;
       }
@@ -125,6 +125,11 @@
         <select id="scheme"></select>
         <label for="bins">Bins <output for="bins" id="bins-value"></output></label>
         <input id="bins" type="range" step="1" />
+      </fieldset>
+      <fieldset id="terrain-controls" hidden>
+        <legend>DEM source</legend>
+        <label class="check"><input id="hillshade" type="checkbox" />Hillshade</label>
+        <label class="check"><input id="terrain" type="checkbox" />3D terrain</label>
       </fieldset>
       <div id="status">loading…</div>
       <div id="legend"></div>
