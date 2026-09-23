@@ -178,6 +178,13 @@ describe("COGLayer imagery configuration", () => {
     expect(() => layer.setBands([6, 4, 2], [0, 3000])).not.toThrow();
     expect(() => layer.setBands([0, 1])).toThrow(RangeError);
     expect(() => layer.setRescale([1, 0])).toThrow(RangeError);
+    // Three pairs no longer fit once a single band is selected.
+    layer.setRescale([
+      [0, 1],
+      [0, 1],
+      [0, 1],
+    ]);
+    expect(() => layer.setBands([6])).toThrow(/1 colour channel/);
     expect(() => layer.setRescale(undefined)).not.toThrow();
   });
 

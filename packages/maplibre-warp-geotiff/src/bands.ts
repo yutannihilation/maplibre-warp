@@ -84,19 +84,46 @@ export interface BandSelectionTags {
 }
 
 /**
+ * How many leading bands the photometric interpretation itself describes;
+ * `ExtraSamples` has one entry for each band after them.
+ */
+function photometricBandCount(photometric: Photometric): number {
+  switch (photometric) {
+    case Photometric.Rgb:
+    case Photometric.Ycbcr:
+    case Photometric.Cielab:
+      return 3;
+    case Photometric.Separated:
+      return 4;
+    default:
+      return 1;
+  }
+}
+
+/** The first band `ExtraSamples` declares alpha, or `-1` when there is none. */
+function alphaBand(tags: BandSelectionTags): number {
+  const index =
+    tags.extraSamples?.findIndex((v) => ALPHA_EXTRA_SAMPLES.includes(v)) ?? -1;
+  return index < 0 ? -1 : photometricBandCount(tags.photometric) + index;
+}
+
+/**
  * The bands to draw, as 0-based file indices.
  *
  * With `bands` given, it is validated against the file. Without it, the
- * default follows the tags: one band as grey, three as RGB, four as RGBA only
- * when the fourth is declared alpha by `ExtraSamples` (or the file is CMYK) —
- * NAIP's fourth band is near-infrared, not alpha. Two bands, or five and
- * more, have no default: the caller must say which bands it wants.
+ * default follows the tags: a palette draws its index band; CMYK its four
+ * channels; an RGB-like interpretation its three colour bands, plus the
+ * fourth when `ExtraSamples` declares that band alpha; grey files with one
+ * band draw grey, with three or four bands they draw as RGB(A) by the same
+ * alpha rule — NAIP's fourth band is near-infrared, not alpha. Anything else
+ * (grey + alpha, a five-band grey stack) has no default: the caller must say
+ * which bands it wants.
  */
 export function resolveBandSelection(
   tags: BandSelectionTags,
   bands?: readonly number[],
 ): number[] {
-  const { samplesPerPixel, photometric, extraSamples } = tags;
+  const { samplesPerPixel, photometric } = tags;
   if (bands !== undefined) {
     validateBandList(bands);
     for (const band of bands) {
@@ -119,22 +146,36 @@ export function resolveBandSelection(
     }
     return [...bands];
   }
+  const noDefault = (): never => {
+    throw new RangeError(
+      `a ${samplesPerPixel}-band raster has no default composite; pass \`bands\``,
+    );
+  };
+  const base = photometricBandCount(photometric);
+  if (samplesPerPixel < base) {
+    throw new RangeError(
+      `PhotometricInterpretation ${photometric} needs ${base} bands, the file has ${samplesPerPixel}`,
+    );
+  }
+  if (photometric === Photometric.Palette) {
+    return [0];
+  }
+  if (photometric === Photometric.Separated) {
+    return [0, 1, 2, 3];
+  }
+  const rgba = (): number[] =>
+    alphaBand(tags) === 3 ? [0, 1, 2, 3] : [0, 1, 2];
+  if (base === 3) {
+    return rgba();
+  }
   switch (samplesPerPixel) {
     case 1:
       return [0];
     case 3:
-      return [0, 1, 2];
-    case 4: {
-      const alpha =
-        photometric === Photometric.Separated ||
-        (extraSamples !== null &&
-          ALPHA_EXTRA_SAMPLES.includes(extraSamples[0]!));
-      return alpha ? [0, 1, 2, 3] : [0, 1, 2];
-    }
+    case 4:
+      return rgba();
     default:
-      throw new RangeError(
-        `a ${samplesPerPixel}-band raster has no default composite; pass \`bands\``,
-      );
+      return noDefault();
   }
 }
 
@@ -231,11 +272,36 @@ export function resolveRescale(
   const min = new Float32Array(3);
   const max = new Float32Array(3);
   for (let c = 0; c < 3; c++) {
-    const pair = pairs[pairs.length === 1 ? 0 : Math.min(c, pairs.length - 1)]!;
+    // One pair for every channel, or (checked above) exactly one per channel.
+    const pair = pairs.length === 1 ? pairs[0]! : pairs[c]!;
     min[c] = pair[0] / divisor;
     max[c] = pair[1] / divisor;
   }
   return { min, max };
+}
+
+/**
+ * Check imagery options as far as they can be without the file: the band
+ * list's shape, the stretch's shape, and that the two fit each other when
+ * both are given. Range against the file is checked by
+ * {@link resolveImageryOptions}.
+ */
+export function validateImageryOptions(options: ImageryRenderOptions): void {
+  const { bands, rescale } = options;
+  if (bands !== undefined) {
+    validateBandList(bands);
+  }
+  if (rescale !== undefined) {
+    const pairs = validateRescale(rescale);
+    if (bands !== undefined) {
+      const colourChannels = Math.min(bands.length, 3);
+      if (pairs.length !== 1 && pairs.length !== colourChannels) {
+        throw new RangeError(
+          `${pairs.length} rescale pairs given for ${colourChannels} colour channel(s)`,
+        );
+      }
+    }
+  }
 }
 
 /** The largest value a sample type holds: what an alpha band is divided by. */

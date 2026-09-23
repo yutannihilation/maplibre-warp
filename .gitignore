@@ -5,5 +5,5 @@ coverage/
 .DS_Store
 .tmp/
 
-# Local verification fixture (see .tmp/research/make-planar.py)
+# Band-separate COG fixture for local verification, generated with rasterio
 examples/cog-basic/public/wv3-planar.tif

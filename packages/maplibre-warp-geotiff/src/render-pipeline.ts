@@ -606,9 +606,21 @@ interface PlanarTile {
   mask: Uint8Array | null;
 }
 
+/**
+ * Planes per decoded tile. The halo cache hands the same `Tile` object out
+ * to every load it serves as a neighbour, so a pixel-interleaved tile is
+ * de-interleaved once rather than up to nine times.
+ */
+const PLANES = new WeakMap<Tile, RasterTypedArray[]>();
+
 function planarTile(tile: Tile): PlanarTile {
   const { width, height, mask } = tile.array;
-  return { width, height, planes: bandPlanes(tile.array), mask };
+  let planes = PLANES.get(tile);
+  if (!planes) {
+    planes = bandPlanes(tile.array);
+    PLANES.set(tile, planes);
+  }
+  return { width, height, planes, mask };
 }
 
 /**

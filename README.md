@@ -121,10 +121,12 @@ layer.setRescale([[300, 3600], [300, 1500], [300, 1200]]);
 layer.setBands([6]);
 ```
 
-Without `bands`, one band draws as grey, three as RGB, and four as RGBA only
-when `ExtraSamples` declares the fourth alpha (or the file is CMYK) — NAIP's
-fourth band is near-infrared and is left out. Two bands, or five and more,
-have no default and need `bands`. Every sample type in the texture table is
+Without `bands`, the photometric interpretation decides: a palette draws its
+index band, CMYK its four channels, an RGB file its three colour bands plus
+the fourth when `ExtraSamples` declares that band alpha — NAIP's fourth band
+is near-infrared and is left out. A grey file draws one band as grey and
+three or four as RGB(A) by the same alpha rule; grey + alpha and grey stacks
+of five or more bands have no default and need `bands`. Every sample type in the texture table is
 read with an exactly typed sampler (`sampler2DArray`, `usampler2DArray`,
 `isampler2DArray`), interpolated bilinearly in the shader from a one-texel
 halo of neighbour tiles, so seams and nodata are exact: a pixel is nodata

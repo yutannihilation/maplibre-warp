@@ -261,7 +261,11 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
         if (signal.aborted) {
           return;
         }
-        if (attempt > this.maxRetries) {
+        // A `RangeError` is how sources report a configuration that the
+        // file's tags cannot satisfy (a band the file lacks, a stretch that
+        // does not fit the selection). No retry can change that, so report it
+        // at once instead of after a backoff that suggests an outage.
+        if (error instanceof RangeError || attempt > this.maxRetries) {
           console.error(
             `[${this.id}] failed to open raster source, giving up`,
             error,

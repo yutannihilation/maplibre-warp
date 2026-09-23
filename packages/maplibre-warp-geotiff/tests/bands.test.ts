@@ -9,6 +9,7 @@ import {
   resolveRescale,
   sampleTypeMax,
   validateBandList,
+  validateImageryOptions,
   validateRescale,
 } from "../src/bands.js";
 
@@ -46,14 +47,43 @@ describe("resolveBandSelection defaults", () => {
     ]);
   });
 
-  it("has no default for two or five-plus bands", () => {
+  it("has no default for grey + alpha or a five-plus band grey stack", () => {
     expect(() => resolveBandSelection(tags(2))).toThrow(/pass `bands`/);
+    expect(() =>
+      resolveBandSelection(tags(2, Photometric.MinIsBlack, [2])),
+    ).toThrow(/pass `bands`/);
     // Maxar WorldView-3: eight uint16 bands, MinIsBlack.
     expect(() =>
       resolveBandSelection(
         tags(8, Photometric.MinIsBlack, [0, 0, 0, 0, 0, 0, 0]),
       ),
     ).toThrow(/8-band raster/);
+  });
+
+  it("counts ExtraSamples from the first band the photometric does not cover", () => {
+    // Grey file with three extras: ExtraSamples[2] describes band 3.
+    expect(
+      resolveBandSelection(tags(4, Photometric.MinIsBlack, [0, 0, 2])),
+    ).toEqual([0, 1, 2, 3]);
+    // Alpha on band 1 of a grey stack does not make band 3 alpha.
+    expect(
+      resolveBandSelection(tags(4, Photometric.MinIsBlack, [2, 0, 0])),
+    ).toEqual([0, 1, 2]);
+    // RGB plus two extras: the colour bands are known, whatever the extras.
+    expect(resolveBandSelection(tags(5, Photometric.Rgb, [0, 0]))).toEqual([
+      0, 1, 2,
+    ]);
+    expect(resolveBandSelection(tags(5, Photometric.Rgb, [2, 0]))).toEqual([
+      0, 1, 2, 3,
+    ]);
+    // CMYK with an extra band still draws its four channels.
+    expect(resolveBandSelection(tags(5, Photometric.Separated, [0]))).toEqual([
+      0, 1, 2, 3,
+    ]);
+    // Fewer bands than the interpretation needs is a malformed file.
+    expect(() => resolveBandSelection(tags(2, Photometric.Rgb))).toThrow(
+      /needs 3 bands/,
+    );
   });
 });
 
@@ -137,6 +167,39 @@ describe("validateRescale", () => {
     expect(() =>
       validateRescale([[0, 1, 2] as unknown as [number, number]]),
     ).toThrow(/two finite numbers/);
+  });
+});
+
+describe("validateImageryOptions", () => {
+  it("cross-checks the stretch against the selection when both are given", () => {
+    expect(() =>
+      validateImageryOptions({ bands: [4, 2, 1], rescale: [0, 1] }),
+    ).not.toThrow();
+    expect(() =>
+      validateImageryOptions({
+        bands: [4, 2, 1],
+        rescale: [
+          [0, 1],
+          [0, 1],
+          [0, 1],
+        ],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateImageryOptions({
+        bands: [6],
+        rescale: [
+          [0, 1],
+          [0, 1],
+          [0, 1],
+        ],
+      }),
+    ).toThrow(/1 colour channel/);
+    // Either alone is checked for shape only.
+    expect(() => validateImageryOptions({ bands: [12] })).not.toThrow();
+    expect(() => validateImageryOptions({ rescale: [1, 0] })).toThrow(
+      RangeError,
+    );
   });
 });
 

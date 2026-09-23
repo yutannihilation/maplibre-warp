@@ -36,11 +36,7 @@ import {
 import type { Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
 import type { ImageryRenderOptions, Rescale } from "./bands.js";
-import {
-  readExtraSamples,
-  validateBandList,
-  validateRescale,
-} from "./bands.js";
+import { readExtraSamples, validateImageryOptions } from "./bands.js";
 import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
 import { abortError, fetchGeoTIFF } from "./geotiff-utils.js";
 import type {
@@ -148,12 +144,7 @@ export class COGLayer extends RasterCustomLayer {
     if (props.contour) {
       this.rememberContourModel(resolveContourOptions(props.contour));
     }
-    if (props.bands !== undefined) {
-      validateBandList(props.bands);
-    }
-    if (props.rescale !== undefined) {
-      validateRescale(props.rescale);
-    }
+    validateImageryOptions(props);
     this.props = props;
     this.contour = props.contour;
     this.imagery = { bands: props.bands, rescale: props.rescale };
@@ -262,12 +253,7 @@ export class COGLayer extends RasterCustomLayer {
         "setBands/setRescale need a layer created without `contour`; its tiles are drawn as contours",
       );
     }
-    if (imagery.bands !== undefined) {
-      validateBandList(imagery.bands);
-    }
-    if (imagery.rescale !== undefined) {
-      validateRescale(imagery.rescale);
-    }
+    validateImageryOptions(imagery);
     if (this.renderer && this.gl) {
       if (!this.renderer.updateImagery) {
         throw new Error("the active renderer does not support updateImagery");

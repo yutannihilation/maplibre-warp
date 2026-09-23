@@ -312,6 +312,18 @@ export interface CreateTextureArrayOptions {
   format: GLTextureFormat;
 }
 
+/** Per-context `MAX_ARRAY_TEXTURE_LAYERS`: a constant, and `getParameter` stalls. */
+const MAX_ARRAY_TEXTURE_LAYERS = new WeakMap<WebGL2RenderingContext, number>();
+
+function maxArrayTextureLayers(gl: WebGL2RenderingContext): number {
+  let max = MAX_ARRAY_TEXTURE_LAYERS.get(gl);
+  if (max === undefined) {
+    max = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number;
+    MAX_ARRAY_TEXTURE_LAYERS.set(gl, max);
+  }
+  return max;
+}
+
 /**
  * Upload a band stack as a `TEXTURE_2D_ARRAY`: one single-channel layer per
  * plane, so the shader picks bands by layer index and a change of composite
@@ -323,7 +335,7 @@ export function createTextureArray(
   options: CreateTextureArrayOptions,
 ): WebGLTexture {
   const { width, height, planes, format } = options;
-  const maxLayers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number;
+  const maxLayers = maxArrayTextureLayers(gl);
   if (planes.length === 0) {
     throw new RangeError("a texture array needs at least one plane");
   }

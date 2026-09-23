@@ -1,6 +1,6 @@
 import { Photometric, SampleFormat } from "@cogeotiff/core";
 import type { GeoTIFF } from "@developmentseed/geotiff";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GeoTiffTileTextures } from "../src/render-pipeline.js";
 import {
   inferRenderPipeline,
@@ -117,6 +117,10 @@ const moduleNames = (
 ) => pipeline.map((m) => m.module.name);
 
 describe("inferRenderPipeline for imagery", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   const naip = fakeGeoTiff({
     sampleFormat: SampleFormat.Uint,
     bitsPerSample: 8,
@@ -214,7 +218,6 @@ describe("inferRenderPipeline for imagery", () => {
       nearest: true,
       nodata: 250 / 255,
     });
-    vi.unstubAllGlobals();
   });
 
   it("rejects what the tags cannot support, before any tile is loaded", () => {
@@ -859,6 +862,56 @@ describe("contour tile loading", () => {
     await renderer.loadTileTextures(image, { gl, x: 0, y: 0, signal });
     await renderer.loadTileTextures(image, { gl, x: 1, y: 0, signal });
     // Every tile of the 2 × 2 image was already fetched for the first one.
+    expect(fetchTiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("de-interleaves a decoded tile once, however many loads it neighbours", async () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Uint,
+      bitsPerSample: 16,
+      samplesPerPixel: 2,
+    });
+    const { gl, uploads } = recordingGl();
+    const renderer = inferRenderPipeline(geotiff, gl, {
+      bands: [1],
+      rescale: [0, 10],
+    });
+    const tiles = new Map<string, unknown>();
+    const tileAt = (x: number, y: number) => {
+      const key = `${x}/${y}`;
+      if (!tiles.has(key)) {
+        tiles.set(key, {
+          x,
+          y,
+          array: {
+            layout: "pixel-interleaved" as const,
+            width: 2,
+            height: 2,
+            count: 2,
+            data: new Uint16Array([1, 2, 1, 2, 1, 2, 1, 2]),
+            mask: null,
+          },
+        });
+      }
+      return tiles.get(key);
+    };
+    const fetchTiles = vi.fn(async (xy: Array<[number, number]>) =>
+      xy.map(([x, y]) => tileAt(x, y)),
+    );
+    const image = {
+      tileCount: { x: 2, y: 1 },
+      fetchTiles,
+    } as unknown as GeoTIFF;
+    const signal = new AbortController().signal;
+    await renderer.loadTileTextures(image, { gl, x: 0, y: 0, signal });
+    await renderer.loadTileTextures(image, { gl, x: 1, y: 0, signal });
+    // Two tiles × two layers, each layer that band's plane.
+    expect(uploads.map((u) => u.layer)).toEqual([0, 1, 0, 1]);
+    expect(Array.from(uploads[1]!.data as Uint16Array)).toEqual(
+      Array(16).fill(2),
+    );
+    // The same decoded tile served both loads, so the planes came from the
+    // cache: identical arrays back the halo of the second load's neighbour.
     expect(fetchTiles).toHaveBeenCalledTimes(1);
   });
 

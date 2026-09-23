@@ -39,12 +39,15 @@ export function bandPlanes(array: RasterArray): RasterTypedArray[] {
       `pixel-interleaved array has ${data.length} samples, expected ${width}×${height}×${count}`,
     );
   }
-  const planes = Array.from({ length: count }, () => allocateLike(data, size));
-  for (let i = 0; i < size; i++) {
-    const base = i * count;
-    for (let b = 0; b < count; b++) {
-      planes[b]![i] = data[base + b]!;
+  const planes: RasterTypedArray[] = [];
+  // One band at a time: a strided read into a sequential write keeps each
+  // output plane hot in cache.
+  for (let b = 0; b < count; b++) {
+    const plane = allocateLike(data, size);
+    for (let i = 0, j = b; i < size; i++, j += count) {
+      plane[i] = data[j]!;
     }
+    planes.push(plane);
   }
   return planes;
 }

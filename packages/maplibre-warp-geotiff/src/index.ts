@@ -16,6 +16,7 @@ export {
   resolveRescale,
   sampleTypeMax,
   validateBandList,
+  validateImageryOptions,
   validateRescale,
 } from "./bands.js";
 export type { COGLayerProps } from "./cog-layer.js";
