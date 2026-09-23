@@ -97,6 +97,15 @@ function formatTable(
       false,
       8,
     ),
+    // 32-bit unsigned: `float(texelFetch(...))` is exact to 2^24.
+    "1:unorm:32": f(
+      gl.R32UI,
+      gl.RED_INTEGER,
+      gl.UNSIGNED_INT,
+      "uint",
+      false,
+      4,
+    ),
 
     // Signed integer.
     "1:sint:8": f(gl.R8I, gl.RED_INTEGER, gl.BYTE, "int", false, 1),
@@ -289,6 +298,84 @@ export function createTexture2D(
 
   endPixelUpload(gl, savedPixelStore);
   gl.bindTexture(gl.TEXTURE_2D, previousTexture);
+  gl.activeTexture(previousUnit);
+
+  return texture;
+}
+
+export interface CreateTextureArrayOptions {
+  width: number;
+  height: number;
+  /** One `width × height` single-channel plane per layer, in layer order. */
+  planes: readonly ArrayBufferView[];
+  /** A single-channel format: every plane is one band. */
+  format: GLTextureFormat;
+}
+
+/**
+ * Upload a band stack as a `TEXTURE_2D_ARRAY`: one single-channel layer per
+ * plane, so the shader picks bands by layer index and a change of composite
+ * touches no texture. Always NEAREST, since the seeds interpolate with
+ * `texelFetch` themselves.
+ */
+export function createTextureArray(
+  gl: WebGL2RenderingContext,
+  options: CreateTextureArrayOptions,
+): WebGLTexture {
+  const { width, height, planes, format } = options;
+  const maxLayers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number;
+  if (planes.length === 0) {
+    throw new RangeError("a texture array needs at least one plane");
+  }
+  if (planes.length > maxLayers) {
+    throw new Error(
+      `${planes.length} bands exceed MAX_ARRAY_TEXTURE_LAYERS (${maxLayers})`,
+    );
+  }
+  const texture = gl.createTexture();
+  if (!texture) {
+    throw new Error("Failed to create WebGL texture");
+  }
+
+  const previousUnit = gl.getParameter(gl.ACTIVE_TEXTURE) as GLenum;
+  const previousTexture = gl.getParameter(
+    gl.TEXTURE_BINDING_2D_ARRAY,
+  ) as WebGLTexture | null;
+  const savedPixelStore = beginPixelUpload(gl);
+
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
+  gl.texStorage3D(
+    gl.TEXTURE_2D_ARRAY,
+    1,
+    format.internalFormat,
+    width,
+    height,
+    planes.length,
+  );
+  planes.forEach((plane, layer) => {
+    gl.texSubImage3D(
+      gl.TEXTURE_2D_ARRAY,
+      0,
+      0,
+      0,
+      layer,
+      width,
+      height,
+      1,
+      format.format,
+      format.type,
+      plane,
+    );
+  });
+
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+
+  endPixelUpload(gl, savedPixelStore);
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, previousTexture);
   gl.activeTexture(previousUnit);
 
   return texture;

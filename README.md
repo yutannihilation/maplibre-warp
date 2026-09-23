@@ -46,13 +46,16 @@ and the data reaches the GPU unquantised.
 | `@yutannihilation/maplibre-warp-raster` | Renderer core: the custom-layer base class, tile scheduler, warp mesh, shader assembly and program cache. Source-format agnostic. |
 | `@yutannihilation/maplibre-warp-geotiff` | COG specifics: opening the file, building the tile pyramid, inferring a render pipeline from TIFF tags, texture formats. |
 
-`examples/cog-basic` is a Vite app with six datasets that exercise different
+`examples/cog-basic` is a Vite app with eight datasets that exercise different
 paths: swisstopo PK1000 (EPSG:2056 oblique Mercator, RGB), NLCD land cover
 (Albers Equal Area, palette + nodata), a Tennessee orthophoto (EPSG:2274
-State Plane in US survey feet, grayscale + nodata), two float32 DEMs
-(swissALTI3D in EPSG:2056, USGS 3DEP in EPSG:4326) and a uint16 Sentinel-2
-band (EPSG:32636), the last three drawn as shader contours with a legend. A projection selector switches the map between mercator, globe
-and vertical-perspective.
+State Plane in US survey feet, grayscale + nodata), NAIP (EPSG:26913, four
+uint8 bands where the fourth is near-infrared), a Maxar WorldView-3 scene
+(EPSG:32646, eight uint16 bands plus a mask, composed live from a preset
+selector and a stretch slider), two float32 DEMs (swissALTI3D in EPSG:2056,
+USGS 3DEP in EPSG:4326) and a uint16 Sentinel-2 band (EPSG:32636), the last
+three drawn as shader contours with a legend. A projection selector switches
+the map between mercator, globe and vertical-perspective.
 
 ```bash
 pnpm install
@@ -90,8 +93,45 @@ evaluated straight into MapLibre mercator `[0, 1]` in float64. Flat areas get a
 handful of triangles; areas where the projection curves get more.
 
 **Styling.** Shader modules are concatenated into one fragment shader —
-texture seed, nodata discard, mask discard, photometric conversion, colormap —
-and one program is compiled per distinct module chain.
+band seed, mask discard, stretch, photometric conversion, colormap — and one
+program is compiled per distinct module chain.
+
+### Bands
+
+Every band of a tile is uploaded once, as one single-channel layer of a
+`TEXTURE_2D_ARRAY`, whatever the file's `PlanarConfiguration`. Which bands
+make the picture is then a uniform, so a composite or a stretch changes
+without reloading a tile:
+
+```ts
+// WorldView-3: eight uint16 bands. Bands are 0-based file indices;
+// non-8-bit imagery needs a stretch, in sample units.
+const layer = new COGLayer({
+  id: "wv3",
+  geotiff: "https://example.com/scene-ms.tif",
+  bands: [4, 2, 1], // red, green, blue
+  rescale: [0, 1800], // or one [min, max] per colour channel
+});
+
+// Live: false-colour infrared, then a different stretch.
+layer.setBands([6, 4, 2]);
+layer.setRescale([[300, 3600], [300, 1500], [300, 1200]]);
+
+// One band as grey.
+layer.setBands([6]);
+```
+
+Without `bands`, one band draws as grey, three as RGB, and four as RGBA only
+when `ExtraSamples` declares the fourth alpha (or the file is CMYK) — NAIP's
+fourth band is near-infrared and is left out. Two bands, or five and more,
+have no default and need `bands`. Every sample type in the texture table is
+read with an exactly typed sampler (`sampler2DArray`, `usampler2DArray`,
+`isampler2DArray`), interpolated bilinearly in the shader from a one-texel
+halo of neighbour tiles, so seams and nodata are exact: a pixel is nodata
+when any of its colour bands is (palette rasters take the nearest texel
+instead). 8-bit unsigned samples default to their full range; anything else
+without `rescale` is a `RangeError` rather than a guessed stretch. The
+contour `band` is the same layer index and may change through `setContour`.
 
 ### Contours in the shader
 
@@ -143,10 +183,10 @@ layer.setContour({ thresholds: [100, 300, 500, 700, 900], fill: "none" });
 layer.setOpacity(0.5);
 ```
 
-The value is read with an exactly typed sampler (`sampler2D`, `usampler2D`
-or `isampler2D`), so int16, uint16 and float32 rasters work here, and
-interpolated bilinearly in the shader with `texelFetch` — integer textures
-cannot be LINEAR-filtered, and this also keeps nodata exact. Bands classify
+The value is read from the band array with an exactly typed sampler, so
+int16, uint16 and float32 rasters work here, and interpolated bilinearly in
+the shader with `texelFetch` — integer textures cannot be LINEAR-filtered,
+and this also keeps nodata exact. Bands classify
 the value against up to 64 thresholds and look their colour up in a small
 texture; the gradient maps the value onto a 256-texel ramp instead; lines
 measure the distance to the nearest threshold in screen pixels via `fwidth`,
@@ -224,19 +264,14 @@ loading, never per frame.
   float32 mercator and jitter from around z14 — the same limit MapLibre's own
   layers have there. The `globe` projection is unaffected: it renders flat
   mercator above z12, where the relative-to-centre path takes over.
-- **8-bit unsigned samples only for imagery.** 16/32-bit and signed/float
-  rasters throw an explicit error rather than rendering something wrong; they
-  need the integer-sampler path for colour output. The contour path already
-  reads them through typed samplers.
+- **Every band is uploaded.** A tile costs `width × height × bands × bytes`
+  on the GPU whether one band or four are drawn; a 13-band uint16 stack is
+  26 bytes per pixel. That is what makes `setBands` free of reloads.
 - **No terrain draping.** MapLibre renders custom layers directly rather than
   through its render-to-texture pass, so with `map.setTerrain` active the raster
   stays flat at z = 0. Same limitation as deck.gl's interleaved mode.
 - **Primary world only.** Panning past the antimeridian will not draw a wrapped
   copy of the raster.
-- **Nodata edges.** Nodata is a `discard` on an exact value comparison. With
-  linear filtering, texels straddling a nodata boundary interpolate away from
-  the sentinel, so a one-texel halo can appear. Palette images already use
-  nearest filtering; everything else uses linear.
 - **Single COG per layer.** No band compositing across files, no mosaics.
 
 ## Development

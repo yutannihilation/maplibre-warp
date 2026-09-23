@@ -167,25 +167,28 @@ vec3 cielabToRgb(vec3 labTex) {
 
 /** Props for {@link LinearRescale}. */
 export interface LinearRescaleProps {
-  /** Input value mapping to 0. */
-  rescaleMin: number;
-  /** Input value mapping to 1. */
-  rescaleMax: number;
+  /** Per-channel input values mapping to 0, as `[r, g, b]`. */
+  min: Float32Array;
+  /** Per-channel input values mapping to 1, as `[r, g, b]`. */
+  max: Float32Array;
 }
 
-/** Linearly rescale RGB from `[min, max]` to `[0, 1]`, clamping outside. */
+/**
+ * Linearly rescale each colour channel from `[min, max]` to `[0, 1]`,
+ * clamping outside. Alpha is left alone.
+ */
 export const LinearRescale: RasterShaderModule<LinearRescaleProps> = {
   name: "linear-rescale",
-  fsDecl: `uniform float u_rescale_min;
-uniform float u_rescale_max;`,
+  fsDecl: `uniform vec3 u_rescale_min;
+uniform vec3 u_rescale_max;`,
   fsColor:
     "  color.rgb = clamp((color.rgb - u_rescale_min) / (u_rescale_max - u_rescale_min), 0.0, 1.0);",
-  getUniforms: (props) => ({
-    uniforms: {
-      u_rescale_min: props.rescaleMin,
-      u_rescale_max: props.rescaleMax,
-    },
-  }),
+  getUniforms: (props) => {
+    if (props.min.length !== 3 || props.max.length !== 3) {
+      throw new RangeError("rescale min and max need three entries each");
+    }
+    return { uniforms: { u_rescale_min: props.min, u_rescale_max: props.max } };
+  },
 };
 
 /** Props for {@link Colormap}. */
@@ -222,6 +225,8 @@ uniform float u_colormap_reversed;`,
   }),
 };
 
+export type { BandTextureProps } from "./band-texture.js";
+export { BandTexture } from "./band-texture.js";
 export type {
   ContourLineProps,
   IsobandProps,
@@ -231,6 +236,7 @@ export type {
   ValueTextureProps,
 } from "./contour.js";
 export {
+  ARRAY_SAMPLER_TYPE,
   ClearColor,
   ContourLine,
   Isoband,

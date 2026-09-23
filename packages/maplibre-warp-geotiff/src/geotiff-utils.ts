@@ -1,55 +1,52 @@
 // Adapted from @developmentseed/deck.gl-raster (MIT, Development Seed):
-// packages/deck.gl-geotiff/src/geotiff/geotiff.ts
+// packages/deck.gl-geotiff/src/geotiff/geotiff.ts (fetchGeoTIFF)
 
 import type {
   ConcurrencyLimiter,
   Priority,
-  RasterArrayPixelInterleaved,
+  RasterArray,
   RasterTypedArray,
 } from "@developmentseed/geotiff";
 import { GeoTIFF } from "@developmentseed/geotiff";
 
 /**
- * Add an alpha channel to an RGB image array.
- *
- * WebGL2 has no usable three-channel 8-bit sampleable format, so 3-band data
- * is padded to RGBA before upload. Returns the input unchanged when it already
- * has four channels.
+ * One `width × height` plane per band, whichever layout the tile was decoded
+ * in. A band-separate array already is that, and is returned without a copy;
+ * a pixel-interleaved one is de-interleaved in a single pass. These planes are
+ * the layers of the tile's `TEXTURE_2D_ARRAY`.
  */
-export function addAlphaChannel(
-  rgbImage: RasterArrayPixelInterleaved,
-): RasterArrayPixelInterleaved {
-  const { height, width } = rgbImage;
-
-  if (rgbImage.data.length === height * width * 4) {
-    return rgbImage;
+export function bandPlanes(array: RasterArray): RasterTypedArray[] {
+  const { width, height, count } = array;
+  const size = width * height;
+  if (array.layout === "band-separate") {
+    if (array.bands.length !== count) {
+      throw new RangeError(
+        `band-separate array has ${array.bands.length} planes, count says ${count}`,
+      );
+    }
+    for (const [b, plane] of array.bands.entries()) {
+      if (plane.length !== size) {
+        throw new RangeError(
+          `plane ${b} has ${plane.length} samples, expected ${width}×${height}`,
+        );
+      }
+    }
+    return array.bands;
   }
-  if (rgbImage.data.length !== height * width * 3) {
-    throw new Error(
-      `Unexpected number of channels in raster data: ${
-        rgbImage.data.length / (height * width)
-      }`,
+  const { data } = array;
+  if (data.length !== size * count) {
+    throw new RangeError(
+      `pixel-interleaved array has ${data.length} samples, expected ${width}×${height}×${count}`,
     );
   }
-
-  const rgbaLength = (rgbImage.data.length / 3) * 4;
-  const source = rgbImage.data;
-  // Keep the input's element type so the padded array still matches the
-  // texture format chosen for it; alpha is the type's "fully opaque" value.
-  const rgbaArray = allocateLike(source, rgbaLength);
-  const maxAlpha = opaqueAlphaFor(source);
-  for (let i = 0; i < source.length / 3; ++i) {
-    rgbaArray[i * 4] = source[i * 3]!;
-    rgbaArray[i * 4 + 1] = source[i * 3 + 1]!;
-    rgbaArray[i * 4 + 2] = source[i * 3 + 2]!;
-    rgbaArray[i * 4 + 3] = maxAlpha;
+  const planes = Array.from({ length: count }, () => allocateLike(data, size));
+  for (let i = 0; i < size; i++) {
+    const base = i * count;
+    for (let b = 0; b < count; b++) {
+      planes[b]![i] = data[base + b]!;
+    }
   }
-
-  return {
-    ...rgbImage,
-    count: 4,
-    data: rgbaArray,
-  };
+  return planes;
 }
 
 /** A zero-filled typed array of `length` with the same element type as `source`. */
@@ -65,29 +62,6 @@ export function allocateLike(
 /** The rejection every aborted tile load carries. */
 export function abortError(): DOMException {
   return new DOMException("Tile load aborted", "AbortError");
-}
-
-/** The value that reads as fully opaque alpha for a sample type. */
-function opaqueAlphaFor(data: RasterTypedArray): number {
-  if (data instanceof Float32Array || data instanceof Float64Array) {
-    return 1;
-  }
-  if (data instanceof Int8Array) {
-    return 127;
-  }
-  if (data instanceof Int16Array) {
-    return 32767;
-  }
-  if (data instanceof Int32Array) {
-    return 2 ** 31 - 1;
-  }
-  if (data instanceof Uint16Array) {
-    return 65535;
-  }
-  if (data instanceof Uint32Array) {
-    return 2 ** 32 - 1;
-  }
-  return 255;
 }
 
 export async function fetchGeoTIFF(

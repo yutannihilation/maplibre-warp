@@ -18,14 +18,17 @@ const texture = { texture: {} as WebGLTexture, target: 0x0de1 };
 describe("ValueTexture", () => {
   it("declares the sampler kind it was built for and interpolates manually", () => {
     for (const [kind, sampler] of [
-      ["float", "sampler2D"],
-      ["uint", "usampler2D"],
-      ["int", "isampler2D"],
+      ["float", "sampler2DArray"],
+      ["uint", "usampler2DArray"],
+      ["int", "isampler2DArray"],
     ] as const) {
       const module = ValueTexture[kind];
       expect(module.name).toContain(kind);
+      // Array samplers have no default precision in GLSL ES 3.00.
+      expect(module.fsDecl).toContain(`precision highp ${sampler};`);
       expect(module.fsDecl).toContain(`${sampler} u_value_texture`);
-      expect(module.fsColor).toContain("texelFetch");
+      // The band is a layer of the array, so the fetch is three-dimensional.
+      expect(module.fsColor).toContain("ivec3(i00.x, i00.y, u_value_band)");
       expect(module.fsColor).toContain("value =");
     }
   });
@@ -99,15 +102,17 @@ describe("ValueTexture", () => {
     ).toThrow(RangeError);
   });
 
-  it("rejects bands outside 0..3", () => {
-    expect(() =>
-      ValueTexture.int.getUniforms!({
-        texture,
-        band: 4,
-        nodata: null,
-        size: new Float32Array([1, 1]),
-      }),
-    ).toThrow(RangeError);
+  it("accepts any layer index but rejects negative or fractional bands", () => {
+    const size = new Float32Array([1, 1]);
+    expect(
+      ValueTexture.int.getUniforms!({ texture, band: 12, nodata: null, size })
+        .uniforms,
+    ).toMatchObject({ u_value_band: 12 });
+    for (const band of [-1, 1.5]) {
+      expect(() =>
+        ValueTexture.int.getUniforms!({ texture, band, nodata: null, size }),
+      ).toThrow(RangeError);
+    }
   });
 });
 

@@ -35,6 +35,12 @@ import {
 } from "@yutannihilation/maplibre-warp-raster";
 import type { Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
+import type { ImageryRenderOptions, Rescale } from "./bands.js";
+import {
+  readExtraSamples,
+  validateBandList,
+  validateRescale,
+} from "./bands.js";
 import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
 import { abortError, fetchGeoTIFF } from "./geotiff-utils.js";
 import type {
@@ -55,7 +61,9 @@ import {
  */
 const DEFAULT_CONCURRENCY_LIMITER = new PerOriginSemaphore({ maxRequests: 6 });
 
-export interface COGLayerProps extends RasterCustomLayerProps {
+export interface COGLayerProps
+  extends RasterCustomLayerProps,
+    ImageryRenderOptions {
   /**
    * The Cloud-Optimized GeoTIFF: a URL, an `ArrayBuffer` holding the whole
    * file, or an already-opened {@link GeoTIFF}.
@@ -90,7 +98,7 @@ export interface COGLayerProps extends RasterCustomLayerProps {
    * Render the raster as contours — filled bands or a continuous gradient,
    * with or without lines — instead of as imagery. See
    * {@link ContourRenderOptions}; {@link COGLayer.setContour} switches
-   * between them live.
+   * between them live. `bands` and `rescale` are ignored with `contour`.
    */
   contour?: ContourRenderOptions;
 
@@ -128,17 +136,27 @@ export class COGLayer extends RasterCustomLayer {
   private contourBands: ContourBandWithColor[] = [];
   /** Gradient model of {@link contour}, likewise. */
   private contourGradient: ContourGradient | null = null;
+  /** Current imagery options; start as the props', see {@link setBands}. */
+  private imagery: ImageryRenderOptions;
   private renderer?: GeoTiffRenderer;
   private geotiff?: GeoTIFF;
 
   constructor(props: COGLayerProps) {
     super(props);
+    // Fail here rather than inside the retried source-open path; what
+    // depends on the file's tags is checked again when they are known.
     if (props.contour) {
-      // Fail here rather than inside the retried source-open path.
       this.rememberContourModel(resolveContourOptions(props.contour));
+    }
+    if (props.bands !== undefined) {
+      validateBandList(props.bands);
+    }
+    if (props.rescale !== undefined) {
+      validateRescale(props.rescale);
     }
     this.props = props;
     this.contour = props.contour;
+    this.imagery = { bands: props.bands, rescale: props.rescale };
   }
 
   private rememberContourModel(resolved: ResolvedContourOptions): void {
@@ -183,10 +201,12 @@ export class COGLayer extends RasterCustomLayer {
    * frame; a new module chain is compiled on demand. Takes effect immediately
    * when the layer is on a map, or at `onAdd` otherwise.
    *
+   * `band` may change too: every band is on the GPU as a layer of the tile's
+   * texture array.
+   *
    * Refused with a `RangeError`: any option that fails the constructor's
-   * validation, a layer created without `contour` (its tiles hold imagery
-   * textures, not values), and changing `band`. Recreate the layer for
-   * those.
+   * validation, a `band` the file does not have, and a layer created without
+   * `contour` (recreate the layer to switch imagery to contours).
    */
   setContour(contour: ContourRenderOptions): void {
     if (!this.contour) {
@@ -209,6 +229,54 @@ export class COGLayer extends RasterCustomLayer {
     }
     this.contour = contour;
     this.rememberContourModel(resolved);
+  }
+
+  /**
+   * Re-compose the imagery without reloading anything: another selection of
+   * file bands (`[gray]`, `[r, g, b]` or `[r, g, b, a]`, 0-based) and,
+   * optionally, another stretch; without `rescale` the current one is kept.
+   * Every band is already on the GPU, so tiles pick the change up on the
+   * next frame. Takes effect immediately when the layer is on a map, or at
+   * `onAdd` otherwise.
+   *
+   * Refused with a `RangeError`, leaving the current options in place: a
+   * layer created with `contour`, a band outside the file, a selection the
+   * photometric interpretation forbids, or a stretch that does not fit it.
+   */
+  setBands(bands: readonly number[], rescale?: Rescale): void {
+    this.setImagery({ bands, rescale: rescale ?? this.imagery.rescale });
+  }
+
+  /**
+   * Re-stretch the imagery without reloading anything; `undefined` returns
+   * to the default, which only 8-bit unsigned rasters have. Same rules and
+   * timing as {@link setBands}.
+   */
+  setRescale(rescale: Rescale | undefined): void {
+    this.setImagery({ ...this.imagery, rescale });
+  }
+
+  private setImagery(imagery: ImageryRenderOptions): void {
+    if (this.contour) {
+      throw new RangeError(
+        "setBands/setRescale need a layer created without `contour`; its tiles are drawn as contours",
+      );
+    }
+    if (imagery.bands !== undefined) {
+      validateBandList(imagery.bands);
+    }
+    if (imagery.rescale !== undefined) {
+      validateRescale(imagery.rescale);
+    }
+    if (this.renderer && this.gl) {
+      if (!this.renderer.updateImagery) {
+        throw new Error("the active renderer does not support updateImagery");
+      }
+      // Validates against the file's tags before touching any tile.
+      this.renderer.updateImagery(this.gl, imagery);
+      this.map?.triggerRepaint();
+    }
+    this.imagery = imagery;
   }
 
   override onRemove(map: MapLibreMap, gl: WebGL2RenderingContext): void {
@@ -306,8 +374,17 @@ export class COGLayer extends RasterCustomLayer {
       Math.min(rawBounds[3], MAX_WEB_MERCATOR_LAT),
     ];
 
+    // Not among the tags the library prefetches, and it decides whether a
+    // fourth band is alpha or data.
+    const extraSamples = await readExtraSamples(geotiff.image);
+    if (signal.aborted) {
+      return null;
+    }
+
     const renderer = inferRenderPipeline(geotiff, gl, {
       contour: this.contour,
+      ...this.imagery,
+      extraSamples,
     });
     this.renderer = renderer;
 

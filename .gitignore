@@ -4,3 +4,6 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 .tmp/
+
+# Local verification fixture (see .tmp/research/make-planar.py)
+examples/cog-basic/public/wv3-planar.tif

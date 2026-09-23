@@ -1,6 +1,7 @@
 import type {
   ContourFill,
   ContourRenderOptions,
+  Rescale,
 } from "@yutannihilation/maplibre-warp-geotiff";
 import { MAX_THRESHOLDS } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 import {
@@ -57,6 +58,23 @@ export interface ContourStyle {
   lines: boolean;
 }
 
+/** A named band composite of a multi-band dataset. */
+export interface BandPreset {
+  label: string;
+  /** 0-based file bands: `[gray]`, `[r, g, b]` or `[r, g, b, a]`. */
+  bands: number[];
+}
+
+/** How a multi-band dataset is composed; the UI picks the preset and stretch. */
+export interface ImagerySpec {
+  presets: BandPreset[];
+  /**
+   * Stretch range the slider spans, in sample units, and its initial upper
+   * end. Omit for 8-bit data drawn at full range.
+   */
+  stretch?: { max: number; initial: number };
+}
+
 export interface Dataset {
   id: string;
   label: string;
@@ -68,6 +86,22 @@ export interface Dataset {
   note: string;
   /** Render as shader contours instead of imagery. */
   contour?: ContourSpec;
+  /** Band presets and stretch for multi-band imagery. */
+  imagery?: ImagerySpec;
+}
+
+/** The stretch the slider describes: `[0, value]` on every colour channel. */
+export function stretchRescale(
+  spec: ImagerySpec,
+  value: number,
+): Rescale | undefined {
+  if (!spec.stretch) {
+    return undefined;
+  }
+  if (!(value > 0 && value <= spec.stretch.max)) {
+    throw new RangeError(`stretch must be in (0, ${spec.stretch.max}]`);
+  }
+  return [0, value];
 }
 
 /** Fewest bands the UI offers: one threshold plus the open upper band. */
@@ -142,6 +176,41 @@ export const DATASETS: Dataset[] = [
     center: [-84.18, 36.05],
     zoom: 12,
     note: "State Plane in US survey feet; MinIsBlack grayscale, nodata 255.",
+  },
+  {
+    id: "naip",
+    label: "NAIP Colorado 2023 (EPSG:26913, RGB+NIR uint8)",
+    url: "https://naipeuwest.blob.core.windows.net/naip/v002/co/2023/co_030cm_2023/40104/m_4010460_nw_13_030_20231020_20240104.tif",
+    center: [-104.72, 40.19],
+    zoom: 13,
+    note: "Four bands with ExtraSamples = 0: band 4 is near-infrared, not alpha. Switch presets live.",
+    imagery: {
+      presets: [
+        { label: "true colour (R, G, B)", bands: [0, 1, 2] },
+        { label: "false colour infrared (NIR, R, G)", bands: [3, 0, 1] },
+        { label: "near-infrared as grey", bands: [3] },
+      ],
+    },
+  },
+  {
+    id: "maxar-wv3",
+    label: "Maxar WorldView-3 multispectral (EPSG:32646, 8 × uint16)",
+    url: "https://maxar-opendata.s3.amazonaws.com/events/BayofBengal-Cyclone-Mocha-May-23/ard/46/033111330333/2023-05-22/10300100E6747500-ms.tif",
+    center: [92.85, 20.3],
+    zoom: 13,
+    note: "Eight 16-bit bands (coastal, blue, green, yellow, red, red edge, NIR1, NIR2) plus a mask; needs a stretch.",
+    imagery: {
+      presets: [
+        { label: "true colour (red, green, blue)", bands: [4, 2, 1] },
+        { label: "false colour infrared (NIR1, red, green)", bands: [6, 4, 2] },
+        {
+          label: "SWIR-less agriculture (NIR2, red edge, coastal)",
+          bands: [7, 5, 0],
+        },
+        { label: "NIR1 as grey", bands: [6] },
+      ],
+      stretch: { max: 4000, initial: 1800 },
+    },
   },
   {
     id: "swissalti3d",

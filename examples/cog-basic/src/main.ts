@@ -16,6 +16,7 @@ import {
   MAX_BINS,
   MIN_BINS,
   SCHEMES,
+  stretchRescale,
 } from "./datasets.js";
 
 maplibregl.setWorkerUrl(workerUrl);
@@ -29,6 +30,15 @@ const projectionEl = document.getElementById("projection") as HTMLSelectElement;
 const contourControlsEl = document.getElementById(
   "contour-controls",
 ) as HTMLFieldSetElement;
+const bandControlsEl = document.getElementById(
+  "band-controls",
+) as HTMLFieldSetElement;
+const presetEl = document.getElementById("preset") as HTMLSelectElement;
+const stretchRowEl = document.getElementById("stretch-row") as HTMLDivElement;
+const stretchEl = document.getElementById("stretch") as HTMLInputElement;
+const stretchValueEl = document.getElementById(
+  "stretch-value",
+) as HTMLOutputElement;
 const fillEl = document.getElementById("fill") as HTMLSelectElement;
 const linesEl = document.getElementById("lines") as HTMLInputElement;
 const schemeEl = document.getElementById("scheme") as HTMLSelectElement;
@@ -113,6 +123,18 @@ function contourFromControls(dataset: Dataset) {
     : undefined;
 }
 
+/** The band selection the preset control currently names, for `dataset`. */
+function bandsFromControls(dataset: Dataset): number[] | undefined {
+  return dataset.imagery?.presets[Number(presetEl.value)]?.bands;
+}
+
+/** The stretch the slider currently describes, for `dataset`. */
+function rescaleFromControls(dataset: Dataset) {
+  return dataset.imagery
+    ? stretchRescale(dataset.imagery, Number(stretchEl.value))
+    : undefined;
+}
+
 function showDataset(dataset: Dataset): void {
   if (map.getLayer(LAYER_ID)) {
     map.removeLayer(LAYER_ID);
@@ -123,6 +145,26 @@ function showDataset(dataset: Dataset): void {
   // user picks one, its own scheme; the fill mode is the user's and carries
   // across. Imagery datasets have nothing to control.
   contourControlsEl.hidden = !dataset.contour;
+  // Multi-band datasets bring their presets and stretch range.
+  bandControlsEl.hidden = !dataset.imagery;
+  if (dataset.imagery) {
+    presetEl.replaceChildren(
+      ...dataset.imagery.presets.map((preset, i) => {
+        const option = document.createElement("option");
+        option.value = String(i);
+        option.textContent = `${preset.label} → bands ${preset.bands.join(", ")}`;
+        return option;
+      }),
+    );
+    const { stretch } = dataset.imagery;
+    stretchRowEl.hidden = !stretch;
+    if (stretch) {
+      stretchEl.min = "10";
+      stretchEl.max = String(stretch.max);
+      stretchEl.value = String(stretch.initial);
+      stretchValueEl.value = stretchEl.value;
+    }
+  }
   if (dataset.contour) {
     binsEl.value = String(dataset.contour.bins);
     binsValueEl.value = binsEl.value;
@@ -140,6 +182,8 @@ function showDataset(dataset: Dataset): void {
     geotiff: dataset.url,
     opacity: Number(opacityEl.value),
     contour: contourFromControls(dataset),
+    bands: bandsFromControls(dataset),
+    rescale: rescaleFromControls(dataset),
     onGeoTIFFLoad: (geotiff, { projection, geographicBounds }) => {
       const headerMs = Math.round(performance.now() - started);
       statusEl.textContent = [
@@ -177,6 +221,28 @@ function restyleContours(): void {
   }
   current.setContour(contourFromControls(currentDataset)!);
   renderLegend(current);
+}
+
+/**
+ * Apply the band preset to the layer on the map. Every band is already on
+ * the GPU as a layer of each tile's texture array, so `setBands` only
+ * changes which layers the shader reads: no reload, and a new module chain
+ * (grey vs RGB) is compiled on demand.
+ */
+function recompose(): void {
+  if (!current || !currentDataset?.imagery) {
+    return;
+  }
+  current.setBands(bandsFromControls(currentDataset)!);
+}
+
+/** The stretch is a uniform too, so the slider drives it live. */
+function restretch(): void {
+  stretchValueEl.value = stretchEl.value;
+  if (!current || !currentDataset?.imagery) {
+    return;
+  }
+  current.setRescale(rescaleFromControls(currentDataset));
 }
 
 /** Opacity is a per-frame uniform, so this too is live and reload-free. */
@@ -283,6 +349,8 @@ schemeEl.addEventListener("change", () => {
 binsEl.addEventListener("input", restyleContours);
 fillEl.addEventListener("change", restyleContours);
 linesEl.addEventListener("change", restyleContours);
+presetEl.addEventListener("change", recompose);
+stretchEl.addEventListener("input", restretch);
 opacityEl.addEventListener("input", applyOpacity);
 
 // Surface WebGL errors in the example rather than letting them scroll past.
