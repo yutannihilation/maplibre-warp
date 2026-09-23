@@ -27,6 +27,15 @@ describe("COGLayer opacity", () => {
   });
 });
 
+describe("COGLayer prerender", () => {
+  it("is a no-op before the COG has opened", () => {
+    const layer = new COGLayer({ id: "p", geotiff });
+    const gl = {} as WebGL2RenderingContext;
+    const args = {} as Parameters<COGLayer["prerender"]>[1];
+    expect(() => layer.prerender(gl, args)).not.toThrow();
+  });
+});
+
 describe("COGLayer contour configuration", () => {
   it("fails fast in the constructor on any contour configuration error", () => {
     expect(

@@ -233,6 +233,17 @@ describe("RasterCustomLayer zoom handling", () => {
   });
 });
 
+describe("RasterCustomLayer prerender", () => {
+  it("exists, so MapLibre runs the offscreen pass, and is a no-op before a source is attached", () => {
+    const layer = new TestLayer({ id: "t" }, () => Promise.resolve(source));
+    // MapLibre opts a custom layer into the offscreen pass only when
+    // `prerender` is defined — and that pass is where tiles get uploaded.
+    expect(typeof layer.prerender).toBe("function");
+    const args = {} as Parameters<RasterCustomLayer["prerender"]>[1];
+    expect(() => layer.prerender(gl, args)).not.toThrow();
+  });
+});
+
 describe("per-frame uniforms", () => {
   it("folds the map centre into the matrix under mercator", () => {
     const map = {

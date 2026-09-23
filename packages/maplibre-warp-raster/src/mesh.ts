@@ -87,7 +87,13 @@ export function buildTileMesh(
   };
 }
 
-/** Buffers and VAO for one tile's mesh. */
+/**
+ * Buffers and VAO for one tile's mesh.
+ *
+ * Construct inside MapLibre's custom-layer bracket (`prerender` or `render`)
+ * only: the upload leaves the array buffer bound and reads no GL state back.
+ * See "GL state" on `RasterCustomLayer`.
+ */
 export class GpuMesh {
   private readonly buffers: WebGLBuffer[] = [];
   readonly vao: WebGLVertexArrayObject;
@@ -103,13 +109,6 @@ export class GpuMesh {
     this.indexCount = mesh.indices.length;
     this.byteLength = mesh.byteLength;
 
-    const previousVao = gl.getParameter(
-      gl.VERTEX_ARRAY_BINDING,
-    ) as WebGLVertexArrayObject | null;
-    const previousArrayBuffer = gl.getParameter(
-      gl.ARRAY_BUFFER_BINDING,
-    ) as WebGLBuffer | null;
-
     gl.bindVertexArray(vao);
 
     this.addAttribute(gl, ATTRIB_POS_HIGH, mesh.positionsHigh);
@@ -124,8 +123,9 @@ export class GpuMesh {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
 
-    gl.bindVertexArray(previousVao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, previousArrayBuffer);
+    // The element-buffer binding is VAO state: unbind so no later bind is
+    // captured by this mesh.
+    gl.bindVertexArray(null);
   }
 
   private addAttribute(

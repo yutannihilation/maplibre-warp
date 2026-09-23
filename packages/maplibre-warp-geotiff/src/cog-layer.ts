@@ -20,7 +20,7 @@ import type {
   Point,
   RasterCustomLayerProps,
   RasterSource,
-  RasterTilePayload,
+  RasterTileData,
   TileIndex,
 } from "@yutannihilation/maplibre-warp-raster";
 import {
@@ -33,7 +33,7 @@ import {
   mercatorFromEPSG3857,
   RasterCustomLayer,
 } from "@yutannihilation/maplibre-warp-raster";
-import type { Map as MapLibreMap } from "maplibre-gl";
+import type { CustomRenderMethodInput, Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
 import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
 import { abortError, fetchGeoTIFF } from "./geotiff-utils.js";
@@ -180,8 +180,8 @@ export class COGLayer extends RasterCustomLayer {
    * Re-style the contours without reloading anything: thresholds, colours,
    * the fill mode (`"bands"`, `"gradient"`, `"none"`), lines on or off and
    * their style. Tiles already on the GPU pick the change up on the next
-   * frame; a new module chain is compiled on demand. Takes effect immediately
-   * when the layer is on a map, or at `onAdd` otherwise.
+   * frame, which this schedules; a new module chain is compiled on demand.
+   * Applies at `onAdd` if the layer is not on a map yet.
    *
    * Refused with a `RangeError`: any option that fails the constructor's
    * validation, a layer created without `contour` (its tiles hold imagery
@@ -200,15 +200,30 @@ export class COGLayer extends RasterCustomLayer {
       contour,
       this.geotiff?.cachedTags.samplesPerPixel,
     );
-    if (this.renderer && this.gl) {
+    if (this.renderer) {
       if (!this.renderer.updateContour) {
         throw new Error("the active renderer does not support updateContour");
       }
-      this.renderer.updateContour(this.gl, resolved);
+      // Recorded now, applied by `prepare` in the next frame's `prerender`,
+      // inside MapLibre's GL-state bracket.
+      this.renderer.updateContour(resolved);
       this.map?.triggerRepaint();
     }
     this.contour = contour;
     this.rememberContourModel(resolved);
+  }
+
+  /**
+   * Before the tile uploads: create or replace the renderer's layer-wide
+   * textures (a palette's colormap, the contour colours), so the tiles built
+   * this frame can reference them.
+   */
+  override prerender(
+    gl: WebGL2RenderingContext,
+    args: CustomRenderMethodInput,
+  ): void {
+    this.renderer?.prepare(gl);
+    super.prerender(gl, args);
   }
 
   override onRemove(map: MapLibreMap, gl: WebGL2RenderingContext): void {
@@ -227,8 +242,8 @@ export class COGLayer extends RasterCustomLayer {
     signal: AbortSignal;
   }): Promise<RasterSource | null> {
     // A retry re-runs this method, so release anything a previous attempt
-    // managed to allocate before it failed. `inferRenderPipeline` can have
-    // uploaded a colormap texture by then.
+    // managed to allocate before it failed: a frame's `prerender` may have had
+    // the renderer create its textures by then.
     this.renderer?.destroy(gl);
     this.renderer = undefined;
     this.geotiff = undefined;
@@ -333,21 +348,21 @@ export class COGLayer extends RasterCustomLayer {
     const inverseReproject = (mx: number, my: number): Point =>
       descriptor.projectFrom3857(...epsg3857FromMercator([mx, my]));
 
+    // Everything up to the GPU upload: fetch, decode and mesh generation run
+    // here, asynchronously; `upload` runs later, from `prerender`.
     const loadTile = async (
       index: TileIndex,
-      context: { gl: WebGL2RenderingContext; signal: AbortSignal },
-    ): Promise<RasterTilePayload> => {
+      { signal }: { signal: AbortSignal },
+    ): Promise<RasterTileData> => {
       const image = imageForLevel(geotiff, index.z);
-      const textures = await renderer.loadTileTextures(image, {
-        gl: context.gl,
+      const pixels = await renderer.loadTilePixels(image, {
         x: index.x,
         y: index.y,
-        signal: context.signal,
+        signal,
         pool,
       });
 
-      if (context.signal.aborted) {
-        renderer.destroyTileTextures(context.gl, textures);
+      if (signal.aborted) {
         throw abortError();
       }
 
@@ -363,14 +378,14 @@ export class COGLayer extends RasterCustomLayer {
         projectTo4326(...forwardTransform(px, py))[1];
       const initialTriangulation = createInitialWebMercatorTriangulation({
         topLeft: latAt(0, 0),
-        topRight: latAt(textures.width, 0),
-        bottomLeft: latAt(0, textures.height),
-        bottomRight: latAt(textures.width, textures.height),
+        topRight: latAt(pixels.width, 0),
+        bottomLeft: latAt(0, pixels.height),
+        bottomRight: latAt(pixels.width, pixels.height),
       });
 
       const meshData = buildTileMesh(
-        textures.width,
-        textures.height,
+        pixels.width,
+        pixels.height,
         {
           forwardTransform,
           inverseTransform,
@@ -379,16 +394,27 @@ export class COGLayer extends RasterCustomLayer {
         },
         { maxError, initialTriangulation },
       );
-      const mesh = new GpuMesh(context.gl, meshData);
-      const pipeline = renderer.buildPipeline(textures);
 
       return {
-        mesh,
-        pipeline,
-        byteLength: textures.byteLength + meshData.byteLength,
-        destroy: (glContext) => {
-          mesh.destroy(glContext);
-          renderer.destroyTileTextures(glContext, textures);
+        upload: (gl) => {
+          const textures = renderer.uploadTileTextures(gl, pixels);
+          let mesh: GpuMesh;
+          try {
+            mesh = new GpuMesh(gl, meshData);
+          } catch (error) {
+            renderer.destroyTileTextures(gl, textures);
+            throw error;
+          }
+          const pipeline = renderer.buildPipeline(textures);
+          return {
+            mesh,
+            pipeline,
+            byteLength: textures.byteLength + meshData.byteLength,
+            destroy: (glContext) => {
+              mesh.destroy(glContext);
+              renderer.destroyTileTextures(glContext, textures);
+            },
+          };
         },
       };
     };

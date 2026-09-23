@@ -200,15 +200,19 @@ Per-tile local origins are what produce cracks along tile edges.
 
 ### Playing nicely with MapLibre
 
-MapLibre brackets every custom-layer draw itself: `setCustomLayerDefaults()`
+MapLibre's contract lets a custom layer touch GL in `onAdd`, `prerender` and
+`render`, and brackets the latter two itself: `setCustomLayerDefaults()`
 before (which unbinds the VAO and resets cull face, the active texture unit and
 the `UNPACK_*` pixel-store parameters) and `context.setDirty()` after (which
 invalidates its entire cached view of GL state, so anything left bound is
-re-bound before MapLibre next uses it). The layer therefore does **not** save
-and restore state around a draw — that would only duplicate work MapLibre has
-already committed to, at a `gl.getParameter` stall per value per frame.
-Asynchronous tile uploads are a different matter: they run between frames,
-outside that bracket, and restore the pixel-store parameters they touch.
+re-bound before MapLibre next uses it). All GL work therefore happens inside
+those hooks, and none of it saves or restores state — that would only
+duplicate work MapLibre has already committed to, at a `gl.getParameter` stall
+per value. Tiles are fetched, decoded and meshed asynchronously between frames,
+but that stage hands back CPU-side data only; the GPU upload waits for the
+layer's `prerender`, which MapLibre runs before `render` in the same frame.
+Layer-wide textures (a palette's colormap, the contour colours) are created
+there too, which is why `setContour` takes effect on the next frame.
 
 The layer uses **plain `gl.uniform*`, never uniform blocks** — a custom layer that rebinds UBO binding
 points 0–2 corrupts every MapLibre layer drawn after it

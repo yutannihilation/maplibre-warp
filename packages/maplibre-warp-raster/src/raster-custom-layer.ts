@@ -34,15 +34,35 @@ export interface RasterTilePayload {
   destroy(gl: WebGL2RenderingContext): void;
 }
 
+/**
+ * A tile that has been fetched and decoded but not yet uploaded.
+ *
+ * Loading finishes asynchronously, between frames, where a custom layer must
+ * not touch GL (see "GL state" on {@link RasterCustomLayer}). So a source
+ * hands back CPU-side data together with the upload step, and the layer runs
+ * `upload` from its `prerender` hook.
+ */
+export interface RasterTileData {
+  /**
+   * Create the GPU resources for this tile. Called inside MapLibre's
+   * custom-layer bracket, so it may leave GL state as it likes.
+   */
+  upload(gl: WebGL2RenderingContext): RasterTilePayload;
+}
+
 /** A resolved raster source: a tile pyramid plus how to load a tile from it. */
 export interface RasterSource {
   descriptor: RasterTilesetDescriptor;
   /** Dataset extent in WGS84 degrees, `[west, south, east, north]`. */
   wgs84Bounds: Bounds;
+  /**
+   * Fetch and decode one tile. Must not touch GL: that belongs in the
+   * returned {@link RasterTileData.upload}.
+   */
   loadTile(
     index: TileIndex,
-    context: { gl: WebGL2RenderingContext; signal: AbortSignal },
-  ): Promise<RasterTilePayload>;
+    context: { signal: AbortSignal },
+  ): Promise<RasterTileData>;
 }
 
 export interface RasterCustomLayerProps {
@@ -119,31 +139,45 @@ export interface RasterCustomLayerProps {
  *
  * ## GL state
  *
- * {@link render} deliberately does **not** save and restore GL state, because
- * MapLibre 6 brackets every custom-layer draw itself (`draw_custom.ts`):
+ * MapLibre's contract for a custom layer names three places it may touch GL:
+ * `onAdd`, `prerender` and `render`. It brackets the latter two itself
+ * (`draw_custom.ts`):
  *
  * - Before the call, `painter.setCustomLayerDefaults()` unbinds the vertex
  *   array and resets cull face (to disabled), the active texture unit (to
  *   `TEXTURE0`) and all three `UNPACK_*` pixel-store parameters to their
- *   defaults. So the incoming state is known, and the layer does not need to
+ *   defaults; blend, depth and stencil are then set for the layer. The layer
+ *   may assume nothing else about the incoming state — and does not need to
  *   disable face culling itself even though a south-up source geotransform
  *   flips its mesh winding.
  * - After the call, `context.setDirty()` marks *every* value MapLibre caches
  *   as dirty, including the program, the active texture unit, the texture,
- *   array-buffer, element-buffer and vertex-array bindings, and cull face. So
- *   anything left bound here is re-bound by MapLibre before it is next used.
+ *   array-buffer, element-buffer and vertex-array bindings, cull face and the
+ *   pixel-store parameters. So anything left bound or set here is re-bound
+ *   by MapLibre before it is next used.
  *
- * Restoring would therefore only duplicate work MapLibre has already
- * committed to, at the cost of a `gl.getParameter` round trip per value per
- * frame — and `getParameter` stalls the pipeline on many drivers.
+ * The layer therefore does all its GL work inside those two hooks and neither
+ * saves nor restores anything: restoring would only duplicate work MapLibre
+ * has already committed to, at the cost of a `gl.getParameter` round trip
+ * per value — and `getParameter` stalls the pipeline on many drivers.
+ *
+ * - {@link prerender} uploads the tiles that finished decoding since the last
+ *   frame (`TileScheduler.uploadPending`). Fetching and decoding run
+ *   asynchronously between frames, but hand back CPU-side data; the GPU half
+ *   is {@link RasterTileData.upload}, and it runs here. Defining `prerender`
+ *   is also what opts the layer into MapLibre's offscreen pass, which runs
+ *   before the translucent pass in the same frame, so a tile uploaded here is
+ *   drawn by the `render` that follows.
+ * - {@link render} draws. It sets everything it depends on — program,
+ *   textures, VAO — and touches nothing else.
+ *
+ * Releasing resources (`gl.delete*`) happens on eviction and removal,
+ * outside the hooks, as MapLibre does for its own tiles: deleting an object
+ * cannot leave MapLibre's cache pointing at a binding it will rely on.
  *
  * The one caveat is that `drawCustom` has no `try`/`finally`, so a throw out
- * of {@link render} skips `setDirty()`. That path leaves the frame broken
+ * of either hook skips `setDirty()`. That path leaves the frame broken
  * regardless, since the exception propagates out of MapLibre's render loop.
- *
- * This does **not** extend to tile uploads: those run asynchronously between
- * frames, outside MapLibre's bracket, and restore the state they touch
- * themselves.
  */
 export abstract class RasterCustomLayer implements CustomLayerInterface {
   readonly id: string;
@@ -154,7 +188,7 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
   protected gl?: WebGL2RenderingContext;
 
   private programs?: ProgramCache;
-  private scheduler?: TileScheduler<RasterTilePayload>;
+  private scheduler?: TileScheduler<RasterTileData, RasterTilePayload>;
   private sourceController?: AbortController;
   private warnedUnsupportedProjection = false;
 
@@ -283,7 +317,7 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     map: MapLibreMap,
     gl: WebGL2RenderingContext,
   ): void {
-    this.scheduler = new TileScheduler<RasterTilePayload>({
+    this.scheduler = new TileScheduler<RasterTileData, RasterTilePayload>({
       descriptor: source.descriptor,
       wgs84Bounds: source.wgs84Bounds,
       zRange: this.zRange,
@@ -293,7 +327,8 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
       lodBias: this.lodBias,
       retryBaseDelay: this.retryBaseDelay,
       maxRetries: this.maxRetries,
-      loadTile: (index, signal) => source.loadTile(index, { gl, signal }),
+      loadTile: (index, signal) => source.loadTile(index, { signal }),
+      uploadTile: (data) => data.upload(gl),
       destroyTile: (payload) => payload.destroy(gl),
       byteLengthOf: (payload) => payload.byteLength,
       // Repaint when a tile arrives or a retry falls due, never per frame.
@@ -325,6 +360,15 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     this.programs = undefined;
     this.map = undefined;
     this.gl = undefined;
+  }
+
+  /**
+   * MapLibre's offscreen-pass hook: upload the tiles that finished decoding
+   * since the last frame, inside MapLibre's GL-state bracket. See "GL state"
+   * in the class docs.
+   */
+  prerender(_gl: WebGL2RenderingContext, _args: CustomRenderMethodInput): void {
+    this.scheduler?.uploadPending();
   }
 
   render(gl: WebGL2RenderingContext, args: CustomRenderMethodInput): void {
