@@ -8,8 +8,12 @@
  */
 
 import type { RasterShaderModule, TextureBinding } from "../shader/module.js";
-import type { ValueSamplerKind } from "./contour.js";
-import { ARRAY_SAMPLER_TYPE, BILINEAR_TAPS_GLSL } from "./contour.js";
+import type { ValueSamplerKind } from "./texture-sampling.js";
+import {
+  ARRAY_SAMPLER_TYPE,
+  BILINEAR_SAMPLE_GLSL,
+  BILINEAR_TAPS_GLSL,
+} from "./texture-sampling.js";
 
 export interface BandTextureProps {
   /** A `TEXTURE_2D_ARRAY` with one single-channel layer per band. */
@@ -54,27 +58,7 @@ uniform int u_band_nearest;
 uniform vec2 u_band_size;
 uniform int u_band_halo;
 
-// One layer at the four taps: bilinear, or the nearest tap alone. A tap that
-// is NaN or equals the nodata sentinel marks the sample invalid; in nearest
-// mode only the chosen tap counts, so a class next to nodata keeps its edge.
-float bandTexture_sample(int layer, ivec2 i00, ivec2 i11, vec2 f, out bool invalid) {
-  float v00 = float(texelFetch(u_band_texture, ivec3(i00.x, i00.y, layer), 0).r);
-  float v10 = float(texelFetch(u_band_texture, ivec3(i11.x, i00.y, layer), 0).r);
-  float v01 = float(texelFetch(u_band_texture, ivec3(i00.x, i11.y, layer), 0).r);
-  float v11 = float(texelFetch(u_band_texture, ivec3(i11.x, i11.y, layer), 0).r);
-  if (u_band_nearest == 1) {
-    float v = f.x < 0.5 ? (f.y < 0.5 ? v00 : v01) : (f.y < 0.5 ? v10 : v11);
-    invalid = isnan(v) || (u_band_has_nodata == 1 && v == u_band_nodata);
-    return v;
-  }
-  invalid = isnan(v00) || isnan(v10) || isnan(v01) || isnan(v11);
-  if (u_band_has_nodata == 1 &&
-      (v00 == u_band_nodata || v10 == u_band_nodata ||
-       v01 == u_band_nodata || v11 == u_band_nodata)) {
-    invalid = true;
-  }
-  return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
-}`,
+${BILINEAR_SAMPLE_GLSL("u_band", "u_band_nearest == 1")}`,
     // The taps are shared by every mapped layer. A pixel is nodata when any
     // colour band is (rio-tiler's rule); the alpha band is never a sentinel.
     fsColor: `  {
@@ -85,12 +69,12 @@ ${BILINEAR_TAPS_GLSL("u_band")}
     for (int c = 0; c < 3; c++) {
       int layer = u_band_channels[c];
       if (layer >= 0) {
-        raw[c] = bandTexture_sample(layer, i00, i11, f, bad);
+        raw[c] = u_band_sample(layer, i00, i11, f, bad);
         invalid = invalid || bad;
       }
     }
     if (u_band_channels.a >= 0) {
-      raw.a = bandTexture_sample(u_band_channels.a, i00, i11, f, bad) / u_band_alpha_max;
+      raw.a = u_band_sample(u_band_channels.a, i00, i11, f, bad) / u_band_alpha_max;
     }
     if (invalid) {
       discard;

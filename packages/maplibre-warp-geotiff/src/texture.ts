@@ -258,6 +258,51 @@ function endPixelUpload(
 }
 
 /**
+ * Create a texture and run `upload` with it bound to `target`, with the
+ * pixel-store parameters set for raw data and every piece of GL state this
+ * touches — the pixel store, the previous binding of `target` and the active
+ * unit — restored afterwards. `binding` is the `TEXTURE_BINDING_*` enum that
+ * reads back what is bound to `target`.
+ */
+function withTextureUpload(
+  gl: WebGL2RenderingContext,
+  target: GLenum,
+  binding: GLenum,
+  upload: () => void,
+): WebGLTexture {
+  const texture = gl.createTexture();
+  if (!texture) {
+    throw new Error("Failed to create WebGL texture");
+  }
+  const previousUnit = gl.getParameter(gl.ACTIVE_TEXTURE) as GLenum;
+  const previousTexture = gl.getParameter(binding) as WebGLTexture | null;
+  const savedPixelStore = beginPixelUpload(gl);
+
+  gl.bindTexture(target, texture);
+  upload();
+
+  endPixelUpload(gl, savedPixelStore);
+  gl.bindTexture(target, previousTexture);
+  gl.activeTexture(previousUnit);
+  return texture;
+}
+
+/** Filtering and clamping for a texture bound to `target`. */
+function setSamplerParameters(
+  gl: WebGL2RenderingContext,
+  target: GLenum,
+  filter: GLenum,
+): void {
+  gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  if (target === gl.TEXTURE_2D_ARRAY) {
+    gl.texParameteri(target, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  }
+}
+
+/**
  * Upload a 2D texture.
  */
 export function createTexture2D(
@@ -265,42 +310,21 @@ export function createTexture2D(
   options: CreateTextureOptions,
 ): WebGLTexture {
   const { width, height, data, format, linear } = options;
-  const texture = gl.createTexture();
-  if (!texture) {
-    throw new Error("Failed to create WebGL texture");
-  }
-
-  const previousUnit = gl.getParameter(gl.ACTIVE_TEXTURE) as GLenum;
-  const previousTexture = gl.getParameter(
-    gl.TEXTURE_BINDING_2D,
-  ) as WebGLTexture | null;
-  const savedPixelStore = beginPixelUpload(gl);
-
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-
-  gl.texImage2D(
-    gl.TEXTURE_2D,
-    0,
-    format.internalFormat,
-    width,
-    height,
-    0,
-    format.format,
-    format.type,
-    data,
-  );
-
-  const filter = linear && format.filterable ? gl.LINEAR : gl.NEAREST;
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-  endPixelUpload(gl, savedPixelStore);
-  gl.bindTexture(gl.TEXTURE_2D, previousTexture);
-  gl.activeTexture(previousUnit);
-
-  return texture;
+  return withTextureUpload(gl, gl.TEXTURE_2D, gl.TEXTURE_BINDING_2D, () => {
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      format.internalFormat,
+      width,
+      height,
+      0,
+      format.format,
+      format.type,
+      data,
+    );
+    const filter = linear && format.filterable ? gl.LINEAR : gl.NEAREST;
+    setSamplerParameters(gl, gl.TEXTURE_2D, filter);
+  });
 }
 
 export interface CreateTextureArrayOptions {
@@ -344,53 +368,37 @@ export function createTextureArray(
       `${planes.length} bands exceed MAX_ARRAY_TEXTURE_LAYERS (${maxLayers})`,
     );
   }
-  const texture = gl.createTexture();
-  if (!texture) {
-    throw new Error("Failed to create WebGL texture");
-  }
-
-  const previousUnit = gl.getParameter(gl.ACTIVE_TEXTURE) as GLenum;
-  const previousTexture = gl.getParameter(
-    gl.TEXTURE_BINDING_2D_ARRAY,
-  ) as WebGLTexture | null;
-  const savedPixelStore = beginPixelUpload(gl);
-
-  gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
-  gl.texStorage3D(
+  return withTextureUpload(
+    gl,
     gl.TEXTURE_2D_ARRAY,
-    1,
-    format.internalFormat,
-    width,
-    height,
-    planes.length,
+    gl.TEXTURE_BINDING_2D_ARRAY,
+    () => {
+      gl.texStorage3D(
+        gl.TEXTURE_2D_ARRAY,
+        1,
+        format.internalFormat,
+        width,
+        height,
+        planes.length,
+      );
+      planes.forEach((plane, layer) => {
+        gl.texSubImage3D(
+          gl.TEXTURE_2D_ARRAY,
+          0,
+          0,
+          0,
+          layer,
+          width,
+          height,
+          1,
+          format.format,
+          format.type,
+          plane,
+        );
+      });
+      setSamplerParameters(gl, gl.TEXTURE_2D_ARRAY, gl.NEAREST);
+    },
   );
-  planes.forEach((plane, layer) => {
-    gl.texSubImage3D(
-      gl.TEXTURE_2D_ARRAY,
-      0,
-      0,
-      0,
-      layer,
-      width,
-      height,
-      1,
-      format.format,
-      format.type,
-      plane,
-    );
-  });
-
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
-
-  endPixelUpload(gl, savedPixelStore);
-  gl.bindTexture(gl.TEXTURE_2D_ARRAY, previousTexture);
-  gl.activeTexture(previousUnit);
-
-  return texture;
 }
 
 /**
@@ -404,45 +412,28 @@ export function createColormapTexture(
   gl: WebGL2RenderingContext,
   image: ImageData,
 ): WebGLTexture {
-  const texture = gl.createTexture();
-  if (!texture) {
-    throw new Error("Failed to create WebGL texture");
-  }
-
-  const previousUnit = gl.getParameter(gl.ACTIVE_TEXTURE) as GLenum;
-  const previousTexture = gl.getParameter(
-    gl.TEXTURE_BINDING_2D_ARRAY,
-  ) as WebGLTexture | null;
-  const savedPixelStore = beginPixelUpload(gl);
-
-  gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
-
-  gl.texImage3D(
+  return withTextureUpload(
+    gl,
     gl.TEXTURE_2D_ARRAY,
-    0,
-    gl.RGBA8,
-    image.width,
-    image.height,
-    1,
-    0,
-    gl.RGBA,
-    gl.UNSIGNED_BYTE,
-    new Uint8Array(
-      image.data.buffer,
-      image.data.byteOffset,
-      image.data.byteLength,
-    ),
+    gl.TEXTURE_BINDING_2D_ARRAY,
+    () => {
+      gl.texImage3D(
+        gl.TEXTURE_2D_ARRAY,
+        0,
+        gl.RGBA8,
+        image.width,
+        image.height,
+        1,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        new Uint8Array(
+          image.data.buffer,
+          image.data.byteOffset,
+          image.data.byteLength,
+        ),
+      );
+      setSamplerParameters(gl, gl.TEXTURE_2D_ARRAY, gl.NEAREST);
+    },
   );
-
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
-
-  endPixelUpload(gl, savedPixelStore);
-  gl.bindTexture(gl.TEXTURE_2D_ARRAY, previousTexture);
-  gl.activeTexture(previousUnit);
-
-  return texture;
 }

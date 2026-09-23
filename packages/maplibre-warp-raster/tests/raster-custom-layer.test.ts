@@ -9,6 +9,7 @@ import {
   globeFrameUniforms,
   mercatorFrameUniforms,
   RasterCustomLayer,
+  UnrecoverableSourceError,
 } from "../src/raster-custom-layer.js";
 import type { RasterTilesetDescriptor } from "../src/tileset/tileset-interface.js";
 import type { Point } from "../src/tileset/types.js";
@@ -163,17 +164,21 @@ describe("RasterCustomLayer source opening", () => {
     }
   });
 
-  it("does not retry a configuration error", async () => {
+  it("does not retry an unrecoverable source error", async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const error = vi
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
     try {
-      // A RangeError says the options do not fit the file: no backoff can
+      // The source says its options do not fit the file: no backoff can
       // change that, so it is reported once, at once.
       const layer = new TestLayer({ id: "t", retryBaseDelay: 1000 }, () =>
-        Promise.reject(new RangeError("band 8 is out of range")),
+        Promise.reject(
+          new UnrecoverableSourceError(
+            new RangeError("band 8 is out of range"),
+          ),
+        ),
       );
       layer.onAdd(makeMap(), gl);
       await flush();

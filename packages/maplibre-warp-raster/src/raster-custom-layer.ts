@@ -24,6 +24,19 @@ import { createRasterViewport } from "./viewport-shim.js";
 const DEFAULT_RETRY_BASE_DELAY = 1000;
 const DEFAULT_MAX_RETRIES = 3;
 
+/**
+ * A {@link RasterCustomLayer.createSource} failure no retry can fix: the
+ * layer's options do not fit the source it opened. Thrown by a source with
+ * the underlying error as `cause`; the layer reports it at once instead of
+ * backing off as it does for a transient failure.
+ */
+export class UnrecoverableSourceError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "UnrecoverableSourceError";
+  }
+}
+
 /** Everything the layer needs to draw one loaded tile. */
 export interface RasterTilePayload {
   mesh: GpuMesh;
@@ -261,11 +274,10 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
         if (signal.aborted) {
           return;
         }
-        // A `RangeError` is how sources report a configuration that the
-        // file's tags cannot satisfy (a band the file lacks, a stretch that
-        // does not fit the selection). No retry can change that, so report it
-        // at once instead of after a backoff that suggests an outage.
-        if (error instanceof RangeError || attempt > this.maxRetries) {
+        if (
+          error instanceof UnrecoverableSourceError ||
+          attempt > this.maxRetries
+        ) {
           console.error(
             `[${this.id}] failed to open raster source, giving up`,
             error,

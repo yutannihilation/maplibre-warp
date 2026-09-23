@@ -1,23 +1,16 @@
 export type {
-  BandSelectionTags,
+  ColorConversion,
   ImageryRenderOptions,
   ImageryTags,
   Rescale,
   RescalePair,
-  RescaleTags,
   ResolvedImagery,
-  ResolvedRescale,
 } from "./bands.js";
 export {
-  channelMap,
   readExtraSamples,
   resolveBandSelection,
   resolveImageryOptions,
-  resolveRescale,
-  sampleTypeMax,
-  validateBandList,
   validateImageryOptions,
-  validateRescale,
 } from "./bands.js";
 export type { COGLayerProps } from "./cog-layer.js";
 export { COGLayer } from "./cog-layer.js";
@@ -26,6 +19,7 @@ export {
   imageForLevel,
 } from "./geotiff-tileset.js";
 export { bandPlanes, fetchGeoTIFF, toGlView } from "./geotiff-utils.js";
+export type { Stitchable } from "./halo.js";
 export type {
   ContourBandOptions,
   ContourBandWithColor,

@@ -107,7 +107,6 @@ const textures: GeoTiffTileTextures = {
   width: 256,
   height: 128,
   halo: 0,
-  bands: 1,
   texture: {} as WebGLTexture,
   byteLength: 0,
 };
@@ -160,7 +159,6 @@ describe("inferRenderPipeline for imagery", () => {
     });
     const pipeline = renderer.buildPipeline({
       ...textures,
-      bands: 8,
       mask: {} as WebGLTexture,
     });
     expect(moduleNames(pipeline)).toEqual([
@@ -258,6 +256,28 @@ describe("inferRenderPipeline for imagery", () => {
       expect(other[0]!.props.size).toEqual(new Float32Array([64, 128]));
       // Tiles built afterwards share them too.
       expect(renderer.buildPipeline(textures)[1]!.props).toBe(built[1]!.props);
+    });
+
+    it("updates a same-shaped chain in place, without rebuilding", () => {
+      const gl = stubGl();
+      const renderer = inferRenderPipeline(maxar, gl, {
+        bands: [4, 2, 1],
+        rescale: [0, 2000],
+      });
+      const built = renderer.buildPipeline(textures);
+      const seedProps = built[0]!.props;
+      const rescaleProps = built[1]!.props;
+
+      // A slider drives this at input rate: only the values move.
+      renderer.updateImagery!(gl, { bands: [6, 4, 2], rescale: [0, 900] });
+      expect(built[0]!.props).toBe(seedProps);
+      expect(built[1]!.props).toBe(rescaleProps);
+      expect(Array.from(seedProps.channelMap)).toEqual([6, 4, 2, -1]);
+      expect(Array.from(rescaleProps.max)).toEqual([900, 900, 900]);
+      // Tiles built later share the same arrays.
+      const later = renderer.buildPipeline(textures);
+      expect(later[0]!.props.channelMap).toBe(seedProps.channelMap);
+      expect(later[1]!.props).toBe(rescaleProps);
     });
 
     it("validates against the file and leaves tiles alone on failure", () => {
@@ -616,7 +636,7 @@ describe("inferRenderPipeline with contour", () => {
         offsets: [0, 0, 0, 0, 0, 0, -5, 0],
       });
       const renderer = inferRenderPipeline(multi, gl, { contour });
-      const built = renderer.buildPipeline({ ...textures, bands: 8 });
+      const built = renderer.buildPipeline(textures);
       renderer.updateContour!(
         gl,
         resolveContourOptions({ ...contour, band: 6 }, 8),
@@ -1009,7 +1029,7 @@ describe("contour tile loading", () => {
       { tileCount: { x: 1, y: 1 }, fetchTiles } as unknown as GeoTIFF,
       { gl, x: 0, y: 0, signal: new AbortController().signal },
     );
-    expect(tile).toMatchObject({ width: 2, height: 2, halo: 1, bands: 3 });
+    expect(tile).toMatchObject({ width: 2, height: 2, halo: 1 });
     expect(uploads.map((u) => [u.layer, u.width, u.height])).toEqual([
       [0, 4, 4],
       [1, 4, 4],

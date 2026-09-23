@@ -55,24 +55,42 @@ export async function readExtraSamples(
   return typeof raw === "number" ? [raw] : Array.from(raw);
 }
 
+/**
+ * Check one 0-based band index: a non-negative integer and, when the file's
+ * band count is known, inside it. Shared by the imagery and contour options.
+ */
+export function validateBandIndex(
+  band: number,
+  samplesPerPixel?: number,
+): void {
+  if (!Number.isInteger(band) || band < 0) {
+    throw new RangeError(`band must be a non-negative integer, got ${band}`);
+  }
+  if (samplesPerPixel !== undefined && band >= samplesPerPixel) {
+    throw new RangeError(
+      `band ${band} is out of range for a ${samplesPerPixel}-band raster`,
+    );
+  }
+}
+
 /** Selected band counts a composite can have. */
 const SELECTION_LENGTHS: readonly number[] = [1, 3, 4];
 
 /**
- * Check a band list's shape without knowing the file: integers ≥ 0, and one,
- * three or four of them. Range against the band count is checked by
- * {@link resolveBandSelection}.
+ * Check a band list: one, three or four non-negative integers, inside the
+ * file when its band count is known.
  */
-export function validateBandList(bands: readonly number[]): void {
+export function validateBandList(
+  bands: readonly number[],
+  samplesPerPixel?: number,
+): void {
   if (!SELECTION_LENGTHS.includes(bands.length)) {
     throw new RangeError(
       `bands must list 1 (grey), 3 (RGB) or 4 (RGBA) bands, got ${bands.length}`,
     );
   }
   for (const band of bands) {
-    if (!Number.isInteger(band) || band < 0) {
-      throw new RangeError(`band must be a non-negative integer, got ${band}`);
-    }
+    validateBandIndex(band, samplesPerPixel);
   }
 }
 
@@ -125,14 +143,7 @@ export function resolveBandSelection(
 ): number[] {
   const { samplesPerPixel, photometric } = tags;
   if (bands !== undefined) {
-    validateBandList(bands);
-    for (const band of bands) {
-      if (band >= samplesPerPixel) {
-        throw new RangeError(
-          `band ${band} is out of range for a ${samplesPerPixel}-band raster`,
-        );
-      }
-    }
+    validateBandList(bands, samplesPerPixel);
     if (
       photometric === Photometric.Separated ||
       photometric === Photometric.Cielab
@@ -146,11 +157,6 @@ export function resolveBandSelection(
     }
     return [...bands];
   }
-  const noDefault = (): never => {
-    throw new RangeError(
-      `a ${samplesPerPixel}-band raster has no default composite; pass \`bands\``,
-    );
-  };
   const base = photometricBandCount(photometric);
   if (samplesPerPixel < base) {
     throw new RangeError(
@@ -175,17 +181,19 @@ export function resolveBandSelection(
     case 4:
       return rgba();
     default:
-      return noDefault();
+      throw new RangeError(
+        `a ${samplesPerPixel}-band raster has no default composite; pass \`bands\``,
+      );
   }
 }
 
 /**
  * Layer index per output channel `[r, g, b, a]` for the shader, `-1` where
  * the selection has no band: `[k]` → `[k, -1, -1, -1]`,
- * `[r, g, b]` → `[r, g, b, -1]`.
+ * `[r, g, b]` → `[r, g, b, -1]`. Takes a selection from
+ * {@link resolveBandSelection}, so its shape is not checked again.
  */
 export function channelMap(selection: readonly number[]): Int32Array {
-  validateBandList(selection);
   const map = new Int32Array([-1, -1, -1, -1]);
   selection.forEach((band, i) => {
     map[i] = band;
@@ -229,16 +237,27 @@ export function validateRescale(rescale: Rescale): RescalePair[] {
   return pairs;
 }
 
+/** A per-channel stretch must have one pair per colour channel of the selection. */
+function checkRescaleFits(pairs: RescalePair[], selectedCount: number): void {
+  const colourChannels = Math.min(selectedCount, 3);
+  if (pairs.length !== 1 && pairs.length !== colourChannels) {
+    throw new RangeError(
+      `${pairs.length} rescale pairs given for ${colourChannels} colour channel(s)`,
+    );
+  }
+}
+
 export interface RescaleTags {
   /** Bands in the selection, so a per-channel rescale can be checked. */
   selectedCount: number;
   bitsPerSample: number;
   sampleFormat: SampleFormat;
   /**
-   * Whether the texture samples as `[0, 1]` rather than raw values, in which
-   * case the stretch is expressed in the same units.
+   * What a sampled value is multiplied by to reach raw units: `2^bits − 1`
+   * for a normalised texture, else 1. The stretch is expressed in sampled
+   * units, so it is divided by this.
    */
-  normalized: boolean;
+  denorm: number;
 }
 
 /**
@@ -252,7 +271,7 @@ export function resolveRescale(
   rescale: Rescale | undefined,
   tags: RescaleTags,
 ): ResolvedRescale | null {
-  const { selectedCount, bitsPerSample, sampleFormat, normalized } = tags;
+  const { selectedCount, bitsPerSample, sampleFormat, denorm } = tags;
   if (rescale === undefined) {
     if (sampleFormat === SampleFormat.Uint && bitsPerSample === 8) {
       return null;
@@ -262,20 +281,14 @@ export function resolveRescale(
     );
   }
   const pairs = validateRescale(rescale);
-  const colourChannels = Math.min(selectedCount, 3);
-  if (pairs.length !== 1 && pairs.length !== colourChannels) {
-    throw new RangeError(
-      `${pairs.length} rescale pairs given for ${colourChannels} colour channel(s)`,
-    );
-  }
-  const divisor = normalized ? 2 ** bitsPerSample - 1 : 1;
+  checkRescaleFits(pairs, selectedCount);
   const min = new Float32Array(3);
   const max = new Float32Array(3);
   for (let c = 0; c < 3; c++) {
     // One pair for every channel, or (checked above) exactly one per channel.
     const pair = pairs.length === 1 ? pairs[0]! : pairs[c]!;
-    min[c] = pair[0] / divisor;
-    max[c] = pair[1] / divisor;
+    min[c] = pair[0] / denorm;
+    max[c] = pair[1] / denorm;
   }
   return { min, max };
 }
@@ -294,12 +307,7 @@ export function validateImageryOptions(options: ImageryRenderOptions): void {
   if (rescale !== undefined) {
     const pairs = validateRescale(rescale);
     if (bands !== undefined) {
-      const colourChannels = Math.min(bands.length, 3);
-      if (pairs.length !== 1 && pairs.length !== colourChannels) {
-        throw new RangeError(
-          `${pairs.length} rescale pairs given for ${colourChannels} colour channel(s)`,
-        );
-      }
+      checkRescaleFits(pairs, bands.length);
     }
   }
 }
@@ -321,17 +329,60 @@ export function sampleTypeMax(
   }
 }
 
-/** Everything the imagery seed and rescale module need from the options. */
+/**
+ * How the composed channels become a colour: three or four selected bands
+ * are RGB(A) as they stand; one band is grey, inverted grey or a colormap
+ * lookup by the photometric interpretation; CMYK and CIELab always draw
+ * their default selection, so their conversions apply as a whole.
+ */
+export type ColorConversion =
+  | "rgb"
+  | "gray"
+  | "gray-inverted"
+  | "palette"
+  | "cmyk"
+  | "cielab";
+
+function colorConversion(
+  photometric: Photometric,
+  selectedCount: number,
+): ColorConversion {
+  switch (photometric) {
+    case Photometric.Separated:
+      return "cmyk";
+    case Photometric.Cielab:
+      return "cielab";
+    default:
+      break;
+  }
+  if (selectedCount >= 3) {
+    return "rgb";
+  }
+  switch (photometric) {
+    case Photometric.MinIsWhite:
+      return "gray-inverted";
+    case Photometric.Palette:
+      return "palette";
+    default:
+      // MinIsBlack, or a single band picked out of an RGB / YCbCr /
+      // multispectral file: broadcast it to grey.
+      return "gray";
+  }
+}
+
+/** Everything the imagery seed and its follow-up modules need from the options. */
 export interface ResolvedImagery {
   selection: number[];
   channelMap: Int32Array;
   rescale: ResolvedRescale | null;
+  color: ColorConversion;
 }
 
 export interface ImageryTags extends BandSelectionTags {
   bitsPerSample: number;
   sampleFormat: SampleFormat;
-  normalized: boolean;
+  /** See {@link RescaleTags.denorm}. */
+  denorm: number;
 }
 
 /** Resolve and validate the imagery options in one pass. */
@@ -347,7 +398,8 @@ export function resolveImageryOptions(
       selectedCount: selection.length,
       bitsPerSample: tags.bitsPerSample,
       sampleFormat: tags.sampleFormat,
-      normalized: tags.normalized,
+      denorm: tags.denorm,
     }),
+    color: colorConversion(tags.photometric, selection.length),
   };
 }

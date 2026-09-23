@@ -32,6 +32,7 @@ import {
   MAX_WEB_MERCATOR_LAT,
   mercatorFromEPSG3857,
   RasterCustomLayer,
+  UnrecoverableSourceError,
 } from "@yutannihilation/maplibre-warp-raster";
 import type { Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
@@ -301,8 +302,13 @@ export class COGLayer extends RasterCustomLayer {
 
     const crs = geotiff.crs;
     const resolveEpsg = this.props.epsgResolver ?? defaultEpsgResolver;
-    const sourceProjection =
-      typeof crs === "number" ? await resolveEpsg(crs) : parseWkt(crs);
+    // Two independent reads — an EPSG lookup and a tag the library does not
+    // prefetch, which decides whether a fourth band is alpha or data — so
+    // they overlap. Contours read one band and never need the tag.
+    const [sourceProjection, extraSamples] = await Promise.all([
+      typeof crs === "number" ? resolveEpsg(crs) : parseWkt(crs),
+      this.contour ? null : readExtraSamples(geotiff.image),
+    ]);
     if (signal.aborted) {
       return null;
     }
@@ -360,18 +366,20 @@ export class COGLayer extends RasterCustomLayer {
       Math.min(rawBounds[3], MAX_WEB_MERCATOR_LAT),
     ];
 
-    // Not among the tags the library prefetches, and it decides whether a
-    // fourth band is alpha or data.
-    const extraSamples = await readExtraSamples(geotiff.image);
-    if (signal.aborted) {
-      return null;
+    let renderer: GeoTiffRenderer;
+    try {
+      renderer = inferRenderPipeline(geotiff, gl, {
+        contour: this.contour,
+        ...this.imagery,
+        extraSamples,
+      });
+    } catch (error) {
+      // Every I/O is done by now: a RangeError here says the options do not
+      // fit the file's tags, which no retry can change.
+      throw error instanceof RangeError
+        ? new UnrecoverableSourceError(error)
+        : error;
     }
-
-    const renderer = inferRenderPipeline(geotiff, gl, {
-      contour: this.contour,
-      ...this.imagery,
-      extraSamples,
-    });
     this.renderer = renderer;
 
     this.props.onGeoTIFFLoad?.(geotiff, {

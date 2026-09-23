@@ -44,8 +44,10 @@ describe("BandTexture", () => {
     expect(body).toContain("discard");
     // The alpha sample's `bad` flag is not folded into `invalid`.
     expect(body).toMatch(
-      /raw\.a = bandTexture_sample\([^;]*\) \/ u_band_alpha_max;/,
+      /raw\.a = u_band_sample\([^;]*\) \/ u_band_alpha_max;/,
     );
+    // Palette mode fetches the one nearest texel, not four.
+    expect(decl).toContain("if (u_band_nearest == 1)");
     expect(body).not.toMatch(/raw\.a[^\n]*\n\s*invalid = invalid \|\| bad/);
   });
 

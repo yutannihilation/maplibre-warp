@@ -9,12 +9,15 @@
 
 import type { RasterShaderModule, TextureBinding } from "../shader/module.js";
 import { validateThresholds } from "./contour-bands.js";
+import type { ValueSamplerKind } from "./texture-sampling.js";
+import {
+  ARRAY_SAMPLER_TYPE,
+  BILINEAR_SAMPLE_GLSL,
+  BILINEAR_TAPS_GLSL,
+} from "./texture-sampling.js";
 
 /** Size of the threshold uniform array, and so the most levels per layer. */
 export const MAX_THRESHOLDS = 64;
-
-/** Sampler kinds a value texture can be declared with. */
-export type ValueSamplerKind = "float" | "uint" | "int";
 
 export interface ValueTextureProps {
   /** A `TEXTURE_2D_ARRAY` with one single-channel layer per band. */
@@ -42,26 +45,6 @@ export interface ValueTextureProps {
   halo?: number;
 }
 
-/**
- * GLSL sampler type per kind, for a 2D array texture. Array samplers have no
- * default precision in GLSL ES 3.00, so every kind declares one.
- */
-export const ARRAY_SAMPLER_TYPE: Record<ValueSamplerKind, string> = {
-  float: "sampler2DArray",
-  uint: "usampler2DArray",
-  int: "isampler2DArray",
-};
-
-/** Bilinear tap positions around `uv`, shared by the texture seeds. */
-export const BILINEAR_TAPS_GLSL = (
-  prefix: string,
-): string => `    vec2 p = uv * ${prefix}_size - 0.5 + float(${prefix}_halo);
-    vec2 p0 = floor(p);
-    vec2 f = p - p0;
-    ivec2 maxTexel = ivec2(${prefix}_size) + 2 * ${prefix}_halo - 1;
-    ivec2 i00 = clamp(ivec2(p0), ivec2(0), maxTexel);
-    ivec2 i11 = clamp(ivec2(p0) + 1, ivec2(0), maxTexel);`;
-
 function valueTextureModule(
   kind: ValueSamplerKind,
 ): RasterShaderModule<ValueTextureProps> {
@@ -76,34 +59,16 @@ uniform float u_value_nodata;
 uniform float u_value_scale;
 uniform float u_value_offset;
 uniform vec2 u_value_size;
-uniform int u_value_halo;`,
-    // Manual bilinear interpolation between the four texel centres around
-    // `uv`, so integer textures (which cannot be LINEAR-filtered) and float
-    // textures without OES_texture_float_linear behave alike, and nodata is
-    // exact: any contributing nodata or NaN texel invalidates the pixel
-    // instead of bleeding into it. `uv` maps onto the content; the halo
-    // shifts texel indices into the padded texture, so the outer half texel
-    // of the content interpolates towards the neighbouring tile's edge
-    // rather than clamping to its own. The band is a layer of the array.
+uniform int u_value_halo;
+
+${BILINEAR_SAMPLE_GLSL("u_value", "false")}`,
+    // The band is a layer of the array; see `texture-sampling.ts` for why the
+    // interpolation is manual.
     fsColor: `  {
 ${BILINEAR_TAPS_GLSL("u_value")}
-    float v00 = float(texelFetch(u_value_texture, ivec3(i00.x, i00.y, u_value_band), 0).r);
-    float v10 = float(texelFetch(u_value_texture, ivec3(i11.x, i00.y, u_value_band), 0).r);
-    float v01 = float(texelFetch(u_value_texture, ivec3(i00.x, i11.y, u_value_band), 0).r);
-    float v11 = float(texelFetch(u_value_texture, ivec3(i11.x, i11.y, u_value_band), 0).r);
-    // NaN is a common nodata marker in float rasters and never equals a
-    // sentinel, so test it explicitly; a NaN texel would otherwise poison the
-    // mix and every comparison downstream.
-    valid = 1.0;
-    if (isnan(v00) || isnan(v10) || isnan(v01) || isnan(v11)) {
-      valid = 0.0;
-    }
-    if (u_value_has_nodata == 1 &&
-        (v00 == u_value_nodata || v10 == u_value_nodata ||
-         v01 == u_value_nodata || v11 == u_value_nodata)) {
-      valid = 0.0;
-    }
-    float raw = mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+    bool invalid = false;
+    float raw = u_value_sample(u_value_band, i00, i11, f, invalid);
+    valid = invalid ? 0.0 : 1.0;
     value = raw * u_value_scale + u_value_offset;
     color = vec4(value, 0.0, 0.0, valid);
   }`,

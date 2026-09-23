@@ -129,7 +129,6 @@ describe("channelMap", () => {
     expect(Array.from(channelMap([6]))).toEqual([6, -1, -1, -1]);
     expect(Array.from(channelMap([4, 2, 1]))).toEqual([4, 2, 1, -1]);
     expect(Array.from(channelMap([0, 1, 2, 3]))).toEqual([0, 1, 2, 3]);
-    expect(() => channelMap([0, 1])).toThrow(RangeError);
   });
 });
 
@@ -208,16 +207,12 @@ describe("resolveRescale", () => {
     selectedCount: 3,
     bitsPerSample: 16,
     sampleFormat: SampleFormat.Uint,
-    normalized: false,
+    denorm: 1,
   };
 
   it("needs no module for 8-bit unsigned samples and demands one otherwise", () => {
     expect(
-      resolveRescale(undefined, {
-        ...uint16,
-        bitsPerSample: 8,
-        normalized: true,
-      }),
+      resolveRescale(undefined, { ...uint16, bitsPerSample: 8, denorm: 255 }),
     ).toBeNull();
     expect(() => resolveRescale(undefined, uint16)).toThrow(/needs `rescale`/);
     expect(() =>
@@ -253,7 +248,7 @@ describe("resolveRescale", () => {
       selectedCount: 1,
       bitsPerSample: 8,
       sampleFormat: SampleFormat.Uint,
-      normalized: true,
+      denorm: 255,
     })!;
     expect(resolved.min[0]).toBeCloseTo(51 / 255);
     expect(resolved.max[0]).toBeCloseTo(204 / 255);
@@ -283,21 +278,53 @@ describe("sampleTypeMax", () => {
 });
 
 describe("resolveImageryOptions", () => {
-  it("resolves selection, channel map and stretch together", () => {
+  const maxar = {
+    samplesPerPixel: 8,
+    photometric: Photometric.MinIsBlack,
+    extraSamples: null,
+    bitsPerSample: 16,
+    sampleFormat: SampleFormat.Uint,
+    denorm: 1,
+  };
+
+  it("resolves selection, channel map, stretch and colour together", () => {
     const resolved = resolveImageryOptions(
       { bands: [4, 2, 1], rescale: [0, 2000] },
-      {
-        samplesPerPixel: 8,
-        photometric: Photometric.MinIsBlack,
-        extraSamples: null,
-        bitsPerSample: 16,
-        sampleFormat: SampleFormat.Uint,
-        normalized: false,
-      },
+      maxar,
     );
     expect(resolved.selection).toEqual([4, 2, 1]);
     expect(Array.from(resolved.channelMap)).toEqual([4, 2, 1, -1]);
     expect(Array.from(resolved.rescale!.max)).toEqual([2000, 2000, 2000]);
+    expect(resolved.color).toBe("rgb");
+  });
+
+  it("names the colour conversion from the photometric and the band count", () => {
+    const colour = (
+      photometric: Photometric,
+      bands: number[],
+      samplesPerPixel = 4,
+    ) =>
+      resolveImageryOptions(
+        { bands, rescale: [0, 1] },
+        { ...maxar, photometric, samplesPerPixel },
+      ).color;
+    expect(colour(Photometric.MinIsBlack, [6], 8)).toBe("gray");
+    expect(colour(Photometric.Rgb, [1])).toBe("gray");
+    expect(colour(Photometric.MinIsWhite, [0])).toBe("gray-inverted");
+    expect(colour(Photometric.MinIsWhite, [0, 1, 2])).toBe("rgb");
+    expect(colour(Photometric.Palette, [0], 1)).toBe("palette");
+    expect(
+      resolveImageryOptions(
+        { rescale: [0, 1] },
+        { ...maxar, photometric: Photometric.Separated, samplesPerPixel: 4 },
+      ).color,
+    ).toBe("cmyk");
+    expect(
+      resolveImageryOptions(
+        { rescale: [0, 1] },
+        { ...maxar, photometric: Photometric.Cielab, samplesPerPixel: 3 },
+      ).color,
+    ).toBe("cielab");
   });
 });
 
