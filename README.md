@@ -61,6 +61,10 @@ pnpm dev
 
 ## How it works
 
+This is the short version. [`docs/internals.md`](docs/internals.md) walks
+through the MapLibre custom-layer API, the load-to-texture path and the warp
+in detail.
+
 **Tile selection.** A frustum-culling traversal walks the COG's overview
 pyramid, choosing per tile the coarsest level whose source pixels are no larger
 than a framebuffer pixel. Because a COG pyramid is a stack of independent grids
@@ -152,8 +156,7 @@ texture; the gradient maps the value onto a 256-texel ramp instead; lines
 measure the distance to the nearest threshold in screen pixels via `fwidth`,
 so they keep a constant width at every zoom and under globe. Colours are hex or `rgb()`/`rgba()` strings, and every contour option
 is validated in the `COGLayer` constructor so a misconfiguration fails before
-any network request. Output is raster: no labels and no picking. See
-`docs/adr/0003-shader-contours.md`.
+any network request. Output is raster: no labels and no picking.
 
 ### Globe
 
@@ -175,47 +178,25 @@ switches spaces with it:
   coarsens tiles seen obliquely towards the limb.
 - Under globe, `projectTile` maps its input through a non-linear sphere
   conversion before any matrix, so the relative-to-centre precision scheme
-  below cannot apply: the shader hands it absolute float32 mercator positions,
+  cannot apply: the shader hands it absolute float32 mercator positions,
   exactly as MapLibre's own globe layers do. With the `globe` style projection
   this only runs below z12, where MapLibre switches to flat mercator anyway.
 
-### Precision
+### Precision and GL state
 
-MapLibre hands custom layers a float32 matrix, and absolute mercator positions
-in float32 start to jitter around z14. The fix is relative-to-centre:
+Absolute mercator positions in a float32 vertex pipeline jitter from around
+z14. The layer avoids that with a relative-to-centre scheme: mesh positions
+are split into float32 high/low halves, the map centre is subtracted in the
+vertex shader before MapLibre's `projectTile`, and the translation is folded
+into the matrix on the CPU in float64. Every tile in a frame uses the same
+origin, so shared vertices stay bit-identical and tile edges cannot crack.
 
-- On the CPU, in float64: `O` = the map centre in mercator `[0, 1]`, and the
-  uploaded matrix is `mainMatrix · translate(O)` — whose translation column is
-  now small.
-- Mesh positions are split into float32 high/low halves; `O` is split the same
-  way and uploaded as two `vec2` uniforms.
-- The vertex shader computes
-  `rel = (a_pos_high - u_origin_high) + (a_pos_low - u_origin_low)` and feeds
-  that to MapLibre's own `projectTile` prelude.
-
-Both subtractions are exact (Sterbenz) for anything on screen, and — the part
-that matters — **every tile in a frame uses the same origin**, so a vertex
-shared by two adjacent tiles goes through bit-identical arithmetic in both.
-Per-tile local origins are what produce cracks along tile edges.
-
-### Playing nicely with MapLibre
-
-MapLibre brackets every custom-layer draw itself: `setCustomLayerDefaults()`
-before (which unbinds the VAO and resets cull face, the active texture unit and
-the `UNPACK_*` pixel-store parameters) and `context.setDirty()` after (which
-invalidates its entire cached view of GL state, so anything left bound is
-re-bound before MapLibre next uses it). The layer therefore does **not** save
-and restore state around a draw — that would only duplicate work MapLibre has
-already committed to, at a `gl.getParameter` stall per value per frame.
-Asynchronous tile uploads are a different matter: they run between frames,
-outside that bracket, and restore the pixel-store parameters they touch.
-
-The layer uses **plain `gl.uniform*`, never uniform blocks** — a custom layer that rebinds UBO binding
-points 0–2 corrupts every MapLibre layer drawn after it
-([maplibre-gl-js#8413](https://github.com/maplibre/maplibre-gl-js/issues/8413)).
-Output is premultiplied alpha, matching the `blendFunc(ONE, ONE_MINUS_SRC_ALPHA)`
-MapLibre configures. `map.triggerRepaint()` is called only when a tile finishes
-loading, never per frame.
+The layer also relies on MapLibre's own bracketing of custom-layer draws
+instead of saving and restoring GL state, uses plain `gl.uniform*` rather
+than uniform blocks
+([maplibre-gl-js#8413](https://github.com/maplibre/maplibre-gl-js/issues/8413)),
+and outputs premultiplied alpha. The details, and the reasoning behind each
+choice, are in [`docs/internals.md`](docs/internals.md).
 
 ## Current limitations
 
