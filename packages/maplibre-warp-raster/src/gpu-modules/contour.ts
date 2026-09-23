@@ -9,16 +9,20 @@
 
 import type { RasterShaderModule, TextureBinding } from "../shader/module.js";
 import { validateThresholds } from "./contour-bands.js";
+import type { ValueSamplerKind } from "./texture-sampling.js";
+import {
+  ARRAY_SAMPLER_TYPE,
+  BILINEAR_SAMPLE_GLSL,
+  BILINEAR_TAPS_GLSL,
+} from "./texture-sampling.js";
 
 /** Size of the threshold uniform array, and so the most levels per layer. */
 export const MAX_THRESHOLDS = 64;
 
-/** Sampler kinds a value texture can be declared with. */
-export type ValueSamplerKind = "float" | "uint" | "int";
-
 export interface ValueTextureProps {
+  /** A `TEXTURE_2D_ARRAY` with one single-channel layer per band. */
   texture: TextureBinding;
-  /** Channel to read, 0–3. */
+  /** Layer (band) to read. */
   band: number;
   /** Sentinel that marks missing data, in raw texel units. */
   nodata: number | null;
@@ -41,66 +45,38 @@ export interface ValueTextureProps {
   halo?: number;
 }
 
-const SAMPLER_TYPE: Record<ValueSamplerKind, string> = {
-  float: "sampler2D",
-  uint: "usampler2D",
-  int: "isampler2D",
-};
-
 function valueTextureModule(
   kind: ValueSamplerKind,
 ): RasterShaderModule<ValueTextureProps> {
-  const sampler = SAMPLER_TYPE[kind];
-  // Integer samplers have no default precision in GLSL ES 3.00.
-  const precision = kind === "float" ? "" : `precision highp ${sampler};\n`;
+  const sampler = ARRAY_SAMPLER_TYPE[kind];
   return {
     name: `value-texture-${kind}`,
-    fsDecl: `${precision}uniform ${sampler} u_value_texture;
+    fsDecl: `precision highp ${sampler};
+uniform ${sampler} u_value_texture;
 uniform int u_value_band;
 uniform int u_value_has_nodata;
 uniform float u_value_nodata;
 uniform float u_value_scale;
 uniform float u_value_offset;
 uniform vec2 u_value_size;
-uniform int u_value_halo;`,
-    // Manual bilinear interpolation between the four texel centres around
-    // `uv`, so integer textures (which cannot be LINEAR-filtered) and float
-    // textures without OES_texture_float_linear behave alike, and nodata is
-    // exact: any contributing nodata or NaN texel invalidates the pixel
-    // instead of bleeding into it. `uv` maps onto the content; the halo
-    // shifts texel indices into the padded texture, so the outer half texel
-    // of the content interpolates towards the neighbouring tile's edge
-    // rather than clamping to its own.
+uniform int u_value_halo;
+
+${BILINEAR_SAMPLE_GLSL("u_value", "false")}`,
+    // The band is a layer of the array; see `texture-sampling.ts` for why the
+    // interpolation is manual.
     fsColor: `  {
-    vec2 p = uv * u_value_size - 0.5 + float(u_value_halo);
-    vec2 p0 = floor(p);
-    vec2 f = p - p0;
-    ivec2 maxTexel = ivec2(u_value_size) + 2 * u_value_halo - 1;
-    ivec2 i00 = clamp(ivec2(p0), ivec2(0), maxTexel);
-    ivec2 i11 = clamp(ivec2(p0) + 1, ivec2(0), maxTexel);
-    float v00 = float(texelFetch(u_value_texture, ivec2(i00.x, i00.y), 0)[u_value_band]);
-    float v10 = float(texelFetch(u_value_texture, ivec2(i11.x, i00.y), 0)[u_value_band]);
-    float v01 = float(texelFetch(u_value_texture, ivec2(i00.x, i11.y), 0)[u_value_band]);
-    float v11 = float(texelFetch(u_value_texture, ivec2(i11.x, i11.y), 0)[u_value_band]);
-    // NaN is a common nodata marker in float rasters and never equals a
-    // sentinel, so test it explicitly; a NaN texel would otherwise poison the
-    // mix and every comparison downstream.
-    valid = 1.0;
-    if (isnan(v00) || isnan(v10) || isnan(v01) || isnan(v11)) {
-      valid = 0.0;
-    }
-    if (u_value_has_nodata == 1 &&
-        (v00 == u_value_nodata || v10 == u_value_nodata ||
-         v01 == u_value_nodata || v11 == u_value_nodata)) {
-      valid = 0.0;
-    }
-    float raw = mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+${BILINEAR_TAPS_GLSL("u_value")}
+    bool invalid = false;
+    float raw = u_value_sample(u_value_band, i00, i11, f, invalid);
+    valid = invalid ? 0.0 : 1.0;
     value = raw * u_value_scale + u_value_offset;
     color = vec4(value, 0.0, 0.0, valid);
   }`,
     getUniforms: (props) => {
-      if (!Number.isInteger(props.band) || props.band < 0 || props.band > 3) {
-        throw new RangeError(`band must be 0–3, got ${props.band}`);
+      if (!Number.isInteger(props.band) || props.band < 0) {
+        throw new RangeError(
+          `band must be a non-negative integer, got ${props.band}`,
+        );
       }
       const halo = props.halo ?? 0;
       if (halo !== 0 && halo !== 1) {
@@ -122,7 +98,7 @@ uniform int u_value_halo;`,
   };
 }
 
-/** Seeds `value`/`valid` from a single-value texture; one variant per sampler kind. */
+/** Seeds `value`/`valid` from one layer of a band array texture; one variant per sampler kind. */
 export const ValueTexture: Record<
   ValueSamplerKind,
   RasterShaderModule<ValueTextureProps>

@@ -1,10 +1,25 @@
+export type {
+  ColorConversion,
+  ImageryRenderOptions,
+  ImageryTags,
+  Rescale,
+  RescalePair,
+  ResolvedImagery,
+} from "./bands.js";
+export {
+  readExtraSamples,
+  resolveBandSelection,
+  resolveImageryOptions,
+  validateImageryOptions,
+} from "./bands.js";
 export type { COGLayerProps } from "./cog-layer.js";
 export { COGLayer } from "./cog-layer.js";
 export {
   geoTiffToDescriptor,
   imageForLevel,
 } from "./geotiff-tileset.js";
-export { addAlphaChannel, fetchGeoTIFF, toGlView } from "./geotiff-utils.js";
+export { bandPlanes, fetchGeoTIFF, toGlView } from "./geotiff-utils.js";
+export type { Stitchable } from "./halo.js";
 export type {
   ContourBandOptions,
   ContourBandWithColor,
@@ -14,6 +29,7 @@ export type {
   ContourRenderOptions,
   GeoTiffRenderer,
   GeoTiffTileTextures,
+  InferRenderPipelineOptions,
   ResolvedContourOptions,
 } from "./render-pipeline.js";
 export {
@@ -23,6 +39,7 @@ export {
   validateContourOptions,
 } from "./render-pipeline.js";
 export type {
+  CreateTextureArrayOptions,
   CreateTextureOptions,
   GLTextureFormat,
   SamplerKind,
@@ -30,5 +47,6 @@ export type {
 export {
   createColormapTexture,
   createTexture2D,
+  createTextureArray,
   inferTextureFormat,
 } from "./texture.js";

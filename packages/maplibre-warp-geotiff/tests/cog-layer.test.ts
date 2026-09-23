@@ -140,3 +140,61 @@ describe("COGLayer contour configuration", () => {
     });
   });
 });
+
+describe("COGLayer imagery configuration", () => {
+  it("fails fast in the constructor on a malformed selection or stretch", () => {
+    expect(() => new COGLayer({ id: "i1", geotiff, bands: [0, 1] })).toThrow(
+      RangeError,
+    );
+    expect(() => new COGLayer({ id: "i2", geotiff, bands: [-1] })).toThrow(
+      RangeError,
+    );
+    expect(
+      () => new COGLayer({ id: "i3", geotiff, rescale: [2000, 0] }),
+    ).toThrow(RangeError);
+    expect(
+      () =>
+        new COGLayer({
+          id: "i4",
+          geotiff,
+          bands: [4, 2, 1],
+          rescale: [
+            [0, 1],
+            [0, 1],
+          ],
+        }),
+    ).toThrow(RangeError);
+  });
+
+  it("accepts what only the file can check, deferring the rest", () => {
+    // Band 12 may or may not exist: that is checked when the header is read.
+    expect(
+      () => new COGLayer({ id: "i5", geotiff, bands: [12], rescale: [0, 1] }),
+    ).not.toThrow();
+  });
+
+  it("setBands and setRescale validate before the layer is added", () => {
+    const layer = new COGLayer({ id: "i6", geotiff, bands: [4, 2, 1] });
+    expect(() => layer.setBands([6, 4, 2], [0, 3000])).not.toThrow();
+    expect(() => layer.setBands([0, 1])).toThrow(RangeError);
+    expect(() => layer.setRescale([1, 0])).toThrow(RangeError);
+    // Three pairs no longer fit once a single band is selected.
+    layer.setRescale([
+      [0, 1],
+      [0, 1],
+      [0, 1],
+    ]);
+    expect(() => layer.setBands([6])).toThrow(/1 colour channel/);
+    expect(() => layer.setRescale(undefined)).not.toThrow();
+  });
+
+  it("refuses on a layer created with contour", () => {
+    const layer = new COGLayer({
+      id: "i7",
+      geotiff,
+      contour: { thresholds: [1], fill: "none" },
+    });
+    expect(() => layer.setBands([0])).toThrow(RangeError);
+    expect(() => layer.setRescale([0, 1])).toThrow(RangeError);
+  });
+});

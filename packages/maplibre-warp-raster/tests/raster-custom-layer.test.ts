@@ -9,6 +9,7 @@ import {
   globeFrameUniforms,
   mercatorFrameUniforms,
   RasterCustomLayer,
+  UnrecoverableSourceError,
 } from "../src/raster-custom-layer.js";
 import type { RasterTilesetDescriptor } from "../src/tileset/tileset-interface.js";
 import type { Point } from "../src/tileset/types.js";
@@ -156,6 +157,38 @@ describe("RasterCustomLayer source opening", () => {
       expect(layer.attempts).toBe(3);
       expect(error).toHaveBeenCalledTimes(1);
       expect(layer.ready).toBe(0);
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry an unrecoverable source error", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    try {
+      // The source says its options do not fit the file: no backoff can
+      // change that, so it is reported once, at once.
+      const layer = new TestLayer({ id: "t", retryBaseDelay: 1000 }, () =>
+        Promise.reject(
+          new UnrecoverableSourceError(
+            new RangeError("band 8 is out of range"),
+          ),
+        ),
+      );
+      layer.onAdd(makeMap(), gl);
+      await flush();
+      expect(layer.attempts).toBe(1);
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(warn).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(60000);
+      await flush();
+      expect(layer.attempts).toBe(1);
     } finally {
       warn.mockRestore();
       error.mockRestore();

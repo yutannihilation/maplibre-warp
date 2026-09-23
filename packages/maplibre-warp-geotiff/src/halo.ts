@@ -77,7 +77,8 @@ export function neighbourCoordinates(
   return out;
 }
 
-type Stitchable = Pick<
+/** What {@link stitchHalo} reads of a tile: its shape, samples and mask. */
+export type Stitchable = Pick<
   RasterArrayPixelInterleaved,
   "width" | "height" | "count" | "data" | "mask"
 >;
