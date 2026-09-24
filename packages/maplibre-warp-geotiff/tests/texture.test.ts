@@ -105,18 +105,16 @@ describe("inferTextureFormat", () => {
 });
 
 /**
- * A stub context that records pixel-store writes and answers `getParameter`
- * from them, so the upload functions' state handling can be checked without a
- * real WebGL2 context.
+ * A stub context that records pixel-store writes. `getParameter` throws: the
+ * upload functions run inside MapLibre's GL-state bracket and must never read
+ * state back — a `getParameter` round trip stalls the pipeline, and MapLibre
+ * re-sets whatever they change.
  */
 function makeStubGl() {
   const state = new Map<string, unknown>([
     ["UNPACK_ALIGNMENT", 8],
     ["UNPACK_FLIP_Y_WEBGL", true],
     ["UNPACK_PREMULTIPLY_ALPHA_WEBGL", true],
-    ["ACTIVE_TEXTURE", "TEXTURE3"],
-    ["TEXTURE_BINDING_2D", "previous-2d"],
-    ["TEXTURE_BINDING_2D_ARRAY", "previous-2d-array"],
   ]);
   const uploadState: Record<string, unknown> = {};
 
@@ -128,7 +126,11 @@ function makeStubGl() {
     pixelStorei: (pname: string, value: unknown) => {
       state.set(pname, value);
     },
-    getParameter: (pname: string) => state.get(pname),
+    getParameter: (pname: string) => {
+      throw new Error(
+        `getParameter(${pname}) must not be called: uploads run inside MapLibre's bracket and never read GL state back`,
+      );
+    },
     // Snapshot the pixel-store state at the moment of upload: that, not just
     // the end state, is what decides whether the bytes land correctly.
     texImage2D: () => {
@@ -151,14 +153,14 @@ function makeStubGl() {
     get: (target, name: string) => (name in target ? target[name] : name),
   }) as unknown as WebGL2RenderingContext;
 
-  return { gl: stub, readPixelStore, uploadState };
+  return { gl: stub, uploadState };
 }
 
 describe("texture upload pixel-store handling", () => {
   const rgba8 = (gl: WebGL2RenderingContext) =>
     inferTextureFormat(gl, 4, [8, 8, 8, 8], UINT);
 
-  it("uploads tightly packed, unflipped and un-premultiplied", () => {
+  it("uploads tightly packed, unflipped and un-premultiplied, whatever the state was", () => {
     const { gl, uploadState } = makeStubGl();
     createTexture2D(gl, {
       width: 2,
@@ -168,7 +170,8 @@ describe("texture upload pixel-store handling", () => {
       linear: true,
     });
     // Raster samples are data, not display-ready colour: any flip or
-    // premultiply would corrupt them.
+    // premultiply would corrupt them. The parameters are set outright rather
+    // than read and restored (the stub's `getParameter` throws).
     expect(uploadState).toEqual({
       alignment: 1,
       flipY: false,
@@ -176,25 +179,8 @@ describe("texture upload pixel-store handling", () => {
     });
   });
 
-  it("restores every pixel-store parameter it changed", () => {
-    const { gl, readPixelStore } = makeStubGl();
-    const before = readPixelStore();
-    createTexture2D(gl, {
-      width: 2,
-      height: 2,
-      data: new Uint8Array(16),
-      format: rgba8(gl),
-      linear: true,
-    });
-    // MapLibre caches its own view of these parameters and only resets them
-    // around a custom layer's `render()`. Tile uploads happen asynchronously,
-    // outside that bracket, so leaking here would desync its cache for good.
-    expect(readPixelStore()).toEqual(before);
-  });
-
-  it("restores pixel-store state after a colormap upload too", () => {
-    const { gl, readPixelStore, uploadState } = makeStubGl();
-    const before = readPixelStore();
+  it("does the same for a colormap upload", () => {
+    const { gl, uploadState } = makeStubGl();
     createColormapTexture(gl, {
       width: 256,
       height: 1,
@@ -206,6 +192,5 @@ describe("texture upload pixel-store handling", () => {
       flipY: false,
       premultiply: false,
     });
-    expect(readPixelStore()).toEqual(before);
   });
 });

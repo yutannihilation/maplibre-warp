@@ -28,15 +28,16 @@ implement rather than a class to extend:
 | `renderingMode` | `"2d"` (default) gets read-only depth; `"3d"` shares the depth buffer. |
 | `onAdd(map, gl)` | Called by `map.addLayer`. Create GL resources, register listeners. |
 | `render(gl, args)` | Called every frame during the translucent pass. Draw into the default framebuffer. |
-| `prerender(gl, args)` | Optional, called in the offscreen pass. For render-to-texture; unused here. |
+| `prerender(gl, args)` | Optional, called in the offscreen pass, which runs before the translucent pass in the same frame. Defining it opts the layer in. Used here for GPU uploads. |
 | `onRemove(map, gl)` | Called by `map.removeLayer`. Free everything. |
 
 `map.triggerRepaint()` is the only way to ask for a frame outside of camera
 movement.
 
-### What `render` receives
+### What the hooks receive
 
-`args` is a `CustomRenderMethodInput`. The two fields this package uses are:
+`prerender` and `render` get the same `args`, a `CustomRenderMethodInput`.
+The two fields this package uses, both in `render`, are:
 
 **`shaderData`** — how to write a vertex shader that projects the way
 MapLibre's own layers do:
@@ -61,34 +62,59 @@ globe there are four more values (`tileMercatorCoords`,
 `clippingPlane`, `projectionTransition`, `fallbackMatrix`), each with a fixed
 uniform name.
 
-### What MapLibre does around the call
+### What MapLibre does around the calls
 
-`drawCustom` in MapLibre 6 wraps every `render` like this:
+MapLibre's contract names three places a custom layer may touch GL: `onAdd`,
+`prerender` and `render`. `drawCustom` (`draw_custom.ts`, MapLibre 6.7)
+brackets the latter two itself, once per frame each:
 
 ```
+// offscreen pass, only if the layer defines prerender
 painter.setCustomLayerDefaults()   // unbind VAO; reset cull face, active
                                    // texture unit and UNPACK_* pixel store
+context.setColorMode(...)
+implementation.prerender(gl, args)
+context.setDirty()                 // forget every cached GL state value
+painter.setBaseState()
+
+// translucent pass
+painter.setCustomLayerDefaults()
 context.setColorMode(...)          // blendFunc(ONE, ONE_MINUS_SRC_ALPHA)
 context.setStencilMode(disabled)
 context.setDepthMode(readOnly)     // for renderingMode "2d"
 implementation.render(gl, args)
-context.setDirty()                 // forget every cached GL state value
+context.setDirty()
+painter.setBaseState()
 ```
 
 Two consequences shape the implementation. Output must be **premultiplied
-alpha**, because of the blend function. And `render` need not save and restore
-GL state: the state on entry is known, and `setDirty()` means MapLibre re-binds
-whatever it needs before its next draw. Anything that runs *outside* this
-bracket, such as an asynchronous texture upload between frames, does have to
-restore what it touches, because MapLibre's cached view of GL state is not
-invalidated there.
+alpha**, because of the blend function. And neither hook needs to save or
+restore GL state: the state on entry is known, and `setDirty()` marks every
+value MapLibre caches (program, active texture unit, texture, buffer and VAO
+bindings, cull face, pixel-store parameters) as unknown, so MapLibre re-binds
+whatever it needs before its next draw. Restoring would only duplicate that
+work, at the cost of a `gl.getParameter` round trip per value, which stalls
+the pipeline on many drivers.
 
-One caveat: `drawCustom` has no `try`/`finally`, so if `render` throws,
+The flip side is that GL work *outside* the bracket would have to restore
+everything it touched, because MapLibre's cached view is not invalidated
+there. This package therefore does none. Fetching, decoding and meshing run
+asynchronously between frames but hand back CPU-side data only; every upload
+waits for `prerender` (section 2.5). No `gl.getParameter` call remains in
+either package. The one thing done outside the hooks is deletion
+(`gl.delete*`) on eviction and removal, as MapLibre does for its own tiles:
+deleting an object cannot leave MapLibre's cache pointing at a binding it
+will rely on.
+
+One caveat: `drawCustom` has no `try`/`finally`, so if a hook throws,
 `setDirty()` is skipped and MapLibre's cached state stays stale for the rest
 of the frame. The exception also propagates out of MapLibre's render loop, so
 that frame is broken regardless. The one thing in `render` that can throw is
 program compilation, which happens lazily at a tile's first draw; a shader
-that fails to compile therefore fails the whole frame, not just the tile.
+that fails to compile therefore fails the whole frame, not just the tile. In
+`prerender` both sources of failure are contained: a tile upload that throws
+fails that tile alone, through the scheduler's retry path, and a failure
+creating the layer-wide textures is caught and logged by `COGLayer.prerender`.
 
 One MapLibre-specific hazard: a custom layer that binds uniform buffer objects
 to binding points 0–2 corrupts every MapLibre layer drawn after it in the same
@@ -114,18 +140,27 @@ COGLayer.createSource   ──► open COG, resolve CRS, build tileset descripto
                             wgs84Bounds, loadTile }
                                 │
                                 ▼
-attachSource            ──► new TileScheduler({ loadTile, destroyTile, … })
-                            map.triggerRepaint()
+attachSource            ──► new TileScheduler({ loadTile, uploadTile,
+                            destroyTile, … }), map.triggerRepaint()
 
 every frame:
+COGLayer.prerender       ─► renderer.prepare(gl): layer-wide textures
+                         ─► scheduler.uploadPending(): decoded tiles → GPU
 RasterCustomLayer.render ─► viewport from args ─► scheduler.update()
                             ─► draw list ─► one drawElements per tile
 ```
 
 `onAdd` allocates nothing but a program cache and starts opening the source;
-until the source resolves, `render` returns immediately and draws nothing.
-`onRemove` aborts the open, destroys the scheduler (which frees every tile's
-GPU resources) and the program cache.
+until the source resolves, both hooks return immediately and draw nothing.
+`onRemove` aborts the open, destroys the scheduler (which frees every loaded
+tile's GPU resources; decoded tiles awaiting upload hold none and are
+dropped), the renderer's layer-wide textures and the program cache.
+
+`prerender` is the GPU half of loading (section 2.5): it creates or replaces
+the layer-wide textures, then uploads the tiles that finished decoding since
+the last frame. Because MapLibre runs the offscreen pass before the
+translucent pass, a tile uploaded here is drawn by the `render` that follows
+in the same frame.
 
 `render` does exactly the work the frame needs and no more:
 
@@ -140,9 +175,11 @@ GPU resources) and the program cache.
 4. Compute the per-frame uniforms (section 3.3) and draw each tile.
 
 Repaints are requested on events, never per frame: when a tile finishes
-loading or a failed tile's retry falls due (the scheduler's `onNeedsRepaint`),
-when the source attaches, when a zoom animation ends, and when `setOpacity`
-or `COGLayer.setContour` changes a per-frame uniform or module chain.
+decoding and needs its upload, when uploads remain after a frame hits its
+byte cap, or when a failed tile's retry falls due (all via the scheduler's
+`onNeedsRepaint`); when the source attaches; when a zoom animation ends; and
+when `setOpacity` or `COGLayer.setContour` changes a per-frame uniform or
+records a re-style for the next `prerender`.
 
 ## 2. Loading: from COG to texture
 
@@ -172,13 +209,17 @@ or `COGLayer.setContour` changes a per-frame uniform or module chain.
 4. **Infer the render pipeline.** `inferRenderPipeline`
    (`render-pipeline.ts`) reads `SampleFormat`, `BitsPerSample`,
    `SamplesPerPixel`, `PhotometricInterpretation`, `ColorMap` and nodata from
-   the tags and returns a `GeoTiffRenderer`: a texture loader plus a function
-   that builds the shader module chain for a tile. A palette image uploads
-   its colormap as a texture here, once for the layer.
+   the tags and returns a `GeoTiffRenderer`: a GL-free tile loader, a
+   bracket-only texture uploader, and a function that builds the shader
+   module chain for a tile. A palette image's `ColorMap` is parsed here, so
+   a missing or malformed one fails while the source opens; the colormap
+   texture itself is created by the renderer's `prepare` in the first
+   `prerender` (section 2.5).
 
 The `RasterSource` returned to the base class is three things: the descriptor,
-the dataset's WGS84 bounds (for culling), and a `loadTile(index, { gl, signal })`
-closure that does everything in the next two subsections.
+the dataset's WGS84 bounds (for culling), and a `loadTile(index, { signal })`
+closure that does the CPU half of the next two subsections and returns a
+`RasterTileData`, whose `upload(gl)` does the GPU half.
 
 ### 2.2 Deciding which tiles to load
 
@@ -200,18 +241,26 @@ Selected tiles that are not loaded are requested centre-out. Loaded ancestors
 and near descendants stand in for them until they arrive. The README's "Tile
 loading" section describes the pruning, retry and eviction policies.
 
+A tile's life in the scheduler is `loading` → `decoded` → `loaded`, or `error`
+from either of the first two. `decoded` is the gap between the loader's
+promise resolving, between frames, and the next `prerender`: the tile's pixels
+and mesh arrays sit in the scheduler's pending-upload queue, it holds no GPU
+memory, it is stood in for exactly like a loading tile, and neither pruning
+nor eviction touches it.
+
 ### 2.3 Fetching and decoding one tile
 
-`GeoTiffRenderer.loadTileTextures` → `fetchTilePixels` (`render-pipeline.ts`):
+`GeoTiffRenderer.loadTilePixels` → `fetchTilePixels` (`render-pipeline.ts`),
+asynchronous and GL-free:
 
 - `image.fetchTile(x, y, { boundless: false, pool, signal })` fetches the
   tile's byte range and decodes it in `@developmentseed/geotiff`'s worker
   `DecoderPool`. `boundless: false` means edge tiles come back clipped to the
   image, so the decoded width and height can be smaller than the nominal tile
   size; everything downstream uses the decoded size.
-- The result is a pixel-interleaved typed array (`Uint8Array`,
-  `Uint16Array`, `Float32Array`, …) plus an optional validity mask from the
-  GeoTIFF's mask IFD. Band-separate layouts are rejected.
+- The result, a `GeoTiffTilePixels`, is a pixel-interleaved typed array
+  (`Uint8Array`, `Uint16Array`, `Float32Array`, …) plus an optional validity
+  mask from the GeoTIFF's mask IFD. Band-separate layouts are rejected.
 - Three-sample data is padded to four with an opaque alpha
   (`addAlphaChannel`), because WebGL2 has no three-channel 8-bit format worth
   sampling from.
@@ -233,13 +282,34 @@ implies for the shader:
 | 1/2/4 × float32 | `R32F` / `RG32F` / `RGBA32F` | `sampler2D` | no¹ | raw floats |
 
 ¹ Linear filtering of float textures needs `OES_texture_float_linear`; the
-table reports it as unavailable and the loader falls back to `NEAREST`.
+table reports it as unavailable and the upload falls back to `NEAREST`.
 
 The imagery path currently accepts only 8-bit unsigned samples and throws for
 the rest. The contour path accepts every row of the table, because it reads
 values with an exact-typed sampler and interpolates in the shader.
 
-### 2.5 Uploading
+### 2.5 Uploading, in `prerender`
+
+Fetching and decoding finish asynchronously, between frames, where a custom
+layer must not touch GL (section 1). So `loadTile` stops at CPU-side data:
+the decoded pixels above and the mesh arrays of section 3.2, wrapped in a
+`RasterTileData` whose `upload(gl)` does the GPU half. The scheduler parks
+the tile as `decoded` and asks for a repaint. In that frame's `prerender`,
+`TileScheduler.uploadPending` runs `upload` for decoded tiles in
+decode-completion order until the frame's uploads reach
+`maxUploadBytesPerFrame` (default 16 MiB); at least one tile goes up per
+frame however small the cap, and if any remain the scheduler asks for another
+frame. Without the cap a burst of tiles that finish decoding together (a fast
+zoom over a warm HTTP cache) would all land in one frame and stall it.
+
+`upload` is `uploadTile` in `cog-layer.ts`: `renderer.uploadTileTextures`,
+then `new GpuMesh`, then `renderer.buildPipeline`. If a step throws, whatever
+was created before it is released, and the scheduler fails the tile through
+the same bounded retry path as a rejected load, so one bad texture never
+takes the frame down. It is a module-level function rather than a closure
+inside the loader so that the payload's `destroy` captures only the GPU
+handles; nested in the loader it would share its closure context and keep the
+decoded pixels and mesh arrays alive for as long as the tile stayed cached.
 
 `createTexture2D` (`texture.ts`) is one `texImage2D` with tightly packed rows,
 no Y flip and no alpha premultiplication, because raster samples are data and
@@ -247,17 +317,26 @@ must reach the texture byte-for-byte. Filtering is `LINEAR` only for 8-bit
 continuous imagery. Palette indices and masks are `NEAREST` by choice, and
 every integer and float32 format is `NEAREST` because the format table marks
 them non-filterable, so `createTexture2D` downgrades the request silently.
-Wrap is `CLAMP_TO_EDGE`.
-
-Uploads happen between frames, outside MapLibre's state bracket, so the
-function saves and restores the active texture unit, the texture binding and
-the three `UNPACK_*` pixel-store parameters around itself. A tile whose load
-was aborted while its texture was already uploaded has that texture deleted
-immediately.
+Wrap is `CLAMP_TO_EDGE`. Because it runs inside MapLibre's bracket it simply
+sets the three `UNPACK_*` pixel-store parameters and leaves the texture bound
+on the current unit; nothing is read back or restored.
 
 The mask, when present, becomes a second `R8` texture at the unpadded tile
 size with `NEAREST` filtering, so its edges never interpolate into a
 half-transparent fringe.
+
+Layer-wide textures go through `prerender` too. `COGLayer.prerender` calls
+`GeoTiffRenderer.prepare(gl)` before the tile uploads, so the pipelines built
+this frame can reference what it creates: a palette's colormap
+(`createColormapTexture`, a single-layer `TEXTURE_2D_ARRAY`) or the contour
+fill's colour lookup. `prepare` consumes its pending work before attempting
+it, so a failure is logged once rather than on every frame; a failed re-style
+keeps the previous textures, and after a failed first `prepare` tile uploads
+fail through the retry path, because `buildPipeline` has nothing to build
+from. This is also why `COGLayer.setContour` takes effect on the following
+frame: `updateContour` is GL-free and only records the resolved options, and
+the next `prepare` creates the new colour textures, deletes the old ones, and
+rewrites the module chain of every live tile in place.
 
 ## 3. Warping: from source pixels to the map
 
@@ -279,7 +358,7 @@ is below a threshold.
 
 ### 3.2 Building the mesh on the CPU
 
-`loadTile` in `cog-layer.ts`, after the textures are ready, composes four
+`loadTile` in `cog-layer.ts`, once the pixels are decoded, composes four
 functions and hands them to the reprojector:
 
 ```
@@ -320,15 +399,18 @@ positions are then split with `splitFloat64Array` (`fp64.ts`) into two
 float32 arrays, `high = fround(v)` and `low = v - high`, which together carry
 about 48 bits of mantissa.
 
-`GpuMesh` (`mesh.ts`) uploads the four arrays into a VAO: three `vec2`
-attributes at fixed locations 0 (`a_pos_high`), 1 (`a_pos_low`) and 2
+The four arrays travel to `prerender` as a `TileMeshData`, alongside the
+decoded pixels. There `GpuMesh` (`mesh.ts`) uploads them into a VAO: three
+`vec2` attributes at fixed locations 0 (`a_pos_high`), 1 (`a_pos_low`) and 2
 (`a_uv`), plus a `Uint32` element buffer. Locations are fixed with
 `bindAttribLocation` in every program, so one VAO works with any program the
-tile may be drawn with.
+tile may be drawn with. The constructor leaves the array buffer bound and
+unbinds only the VAO, so the element-buffer binding, which is VAO state, is
+not captured by a later bind.
 
-Everything in this subsection runs on the main thread, in float64, once per
-tile. The mesh and the textures together form the `RasterTilePayload` the
-scheduler caches and the layer draws.
+Everything up to `GpuMesh` runs on the main thread between frames, in
+float64, once per tile. The mesh and the textures together form the
+`RasterTilePayload` the scheduler caches and the layer draws.
 
 ### 3.3 The vertex shader
 
@@ -415,7 +497,10 @@ The chain for a tile is decided by `GeoTiffRenderer.buildPipeline`. For an
 palette image `CreateTexture → Colormap`; for a single-band grayscale
 `CreateTexture → BlackIsZero`. Each module instance carries the props (a
 texture binding, a nodata value) that `getUniforms` turns into uniform values
-at draw time.
+at draw time. The contour renderer shares its fill and line module instances
+by reference across every tile's chain, which is what lets `prepare` re-style
+all tiles at once by rebuilding those chains in place; the program cache
+compiles any new chain on demand.
 
 ### 3.5 Programs and the draw loop
 

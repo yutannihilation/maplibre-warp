@@ -10,6 +10,7 @@ import {
   mercatorFrameUniforms,
   RasterCustomLayer,
 } from "../src/raster-custom-layer.js";
+import type { TileScheduler } from "../src/tile-scheduler.js";
 import type { RasterTilesetDescriptor } from "../src/tileset/tileset-interface.js";
 import type { Point } from "../src/tileset/types.js";
 
@@ -230,6 +231,31 @@ describe("RasterCustomLayer zoom handling", () => {
 
     layer.onRemove(map, gl);
     expect(map.off).toHaveBeenCalledWith("zoomend", handler);
+  });
+});
+
+describe("RasterCustomLayer prerender", () => {
+  it("exists, so MapLibre runs the offscreen pass, and is a no-op before a source is attached", () => {
+    const layer = new TestLayer({ id: "t" }, () => Promise.resolve(source));
+    // MapLibre opts a custom layer into the offscreen pass only when
+    // `prerender` is defined — and that pass is where tiles get uploaded.
+    expect(typeof layer.prerender).toBe("function");
+    const args = {} as Parameters<RasterCustomLayer["prerender"]>[1];
+    expect(() => layer.prerender(gl, args)).not.toThrow();
+  });
+
+  it("drains the scheduler's decoded tiles once a source is attached", async () => {
+    const layer = new TestLayer({ id: "t" }, () => Promise.resolve(source));
+    layer.onAdd(makeMap(), gl);
+    await flush();
+    // Private, and only created once the source has opened.
+    const scheduler = (
+      layer as unknown as { scheduler: TileScheduler<never, never> }
+    ).scheduler;
+    expect(scheduler).toBeDefined();
+    const uploadPending = vi.spyOn(scheduler, "uploadPending");
+    layer.prerender(gl, {} as Parameters<RasterCustomLayer["prerender"]>[1]);
+    expect(uploadPending).toHaveBeenCalledTimes(1);
   });
 });
 

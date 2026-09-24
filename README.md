@@ -191,9 +191,11 @@ vertex shader before MapLibre's `projectTile`, and the translation is folded
 into the matrix on the CPU in float64. Every tile in a frame uses the same
 origin, so shared vertices stay bit-identical and tile edges cannot crack.
 
-The layer also relies on MapLibre's own bracketing of custom-layer draws
-instead of saving and restoring GL state, uses plain `gl.uniform*` rather
-than uniform blocks
+The layer also relies on MapLibre's own bracketing of the `prerender` and
+`render` hooks instead of saving and restoring GL state: tiles are fetched,
+decoded and meshed asynchronously between frames, but every GPU upload waits
+for `prerender`, capped at `maxUploadBytesPerFrame` per frame. It uses plain
+`gl.uniform*` rather than uniform blocks
 ([maplibre-gl-js#8413](https://github.com/maplibre/maplibre-gl-js/issues/8413)),
 and outputs premultiplied alpha. The details, and the reasoning behind each
 choice, are in [`docs/internals.md`](docs/internals.md).

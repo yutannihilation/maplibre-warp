@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { COGLayer } from "../src/cog-layer.js";
 
@@ -24,6 +24,55 @@ describe("COGLayer opacity", () => {
     expect(layer.opacity).toBe(0.5);
     expect(() => layer.setOpacity(-0.1)).toThrow(RangeError);
     expect(layer.opacity).toBe(0.5);
+  });
+});
+
+describe("COGLayer prerender", () => {
+  it("is a no-op before the COG has opened", () => {
+    const layer = new COGLayer({ id: "p", geotiff });
+    const gl = {} as WebGL2RenderingContext;
+    const args = {} as Parameters<COGLayer["prerender"]>[1];
+    expect(() => layer.prerender(gl, args)).not.toThrow();
+  });
+
+  it("creates the layer-wide textures before uploading tiles", () => {
+    // Tiles built in this frame reference the colormap and contour colours,
+    // so `prepare` must run first: the other way round, every palette or
+    // contour tile would fail with "call prepare(gl) first".
+    const calls: string[] = [];
+    const layer = new COGLayer({ id: "o", geotiff });
+    // Both are private and only exist once the COG has opened.
+    Object.assign(layer as object, {
+      renderer: { prepare: () => calls.push("prepare") },
+      scheduler: { uploadPending: () => calls.push("upload") },
+    });
+    const gl = {} as WebGL2RenderingContext;
+    layer.prerender(gl, {} as Parameters<COGLayer["prerender"]>[1]);
+    expect(calls).toEqual(["prepare", "upload"]);
+  });
+
+  it("logs a failed prepare instead of throwing out of MapLibre's render loop", () => {
+    const error = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    try {
+      const layer = new COGLayer({ id: "q", geotiff });
+      const prepare = vi.fn(() => {
+        throw new Error("Failed to create WebGL texture");
+      });
+      // The renderer is private and only exists once the COG has opened.
+      (layer as unknown as { renderer: { prepare: () => void } }).renderer = {
+        prepare,
+      };
+      const gl = {} as WebGL2RenderingContext;
+      const args = {} as Parameters<COGLayer["prerender"]>[1];
+      expect(() => layer.prerender(gl, args)).not.toThrow();
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(String(error.mock.calls[0]?.[0])).toContain("[q]");
+    } finally {
+      error.mockRestore();
+    }
   });
 });
 
