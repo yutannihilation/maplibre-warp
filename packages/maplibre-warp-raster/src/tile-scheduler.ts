@@ -24,12 +24,10 @@ import type { RasterViewport } from "./tileset/viewport.js";
 export type TileState = "loading" | "decoded" | "loaded" | "error";
 
 /** A tile tracked by the scheduler. */
-export interface SchedulerTile<DecodedT, PayloadT> {
+export interface SchedulerTile<PayloadT> {
   readonly key: string;
   readonly index: TileIndex;
   state: TileState;
-  /** Present while `state === "decoded"`: fetched and decoded, awaiting upload. */
-  decoded?: DecodedT;
   /** Present once `state === "loaded"`. */
   payload?: PayloadT;
   /** Bytes attributed to this tile for the cache cap. */
@@ -216,7 +214,7 @@ export interface DrawableTile<PayloadT> {
 }
 
 export class TileScheduler<DecodedT, PayloadT> {
-  private readonly tiles = new Map<string, SchedulerTile<DecodedT, PayloadT>>();
+  private readonly tiles = new Map<string, SchedulerTile<PayloadT>>();
   private readonly boundingVolumeCache = new BoundingVolumeCache();
   private readonly maxCacheByteSize: number;
   private readonly maxCacheSize: number;
@@ -228,13 +226,15 @@ export class TileScheduler<DecodedT, PayloadT> {
   private readonly zRange: ZRange | null;
   private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
   /**
-   * Decoded tiles awaiting upload, in the order they finished decoding, so
-   * {@link uploadPending} need not scan the whole cache every frame. A
-   * decoded tile leaves `tiles` only through {@link destroy}, which clears
-   * this too: neither pruning nor eviction touches decoded tiles.
+   * Tiles in the `decoded` state and their decoded data, in the order they
+   * finished decoding, so {@link uploadPending} need not scan the whole cache
+   * every frame. A decoded tile leaves `tiles` only through {@link destroy},
+   * which clears this too: neither pruning nor eviction touches decoded
+   * tiles.
    */
-  private readonly pendingUploads = new Set<
-    SchedulerTile<DecodedT, PayloadT>
+  private readonly pendingUploads = new Map<
+    SchedulerTile<PayloadT>,
+    DecodedT
   >();
   private frame = 0;
   private destroyed = false;
@@ -393,11 +393,9 @@ export class TileScheduler<DecodedT, PayloadT> {
     }
     let uploaded = 0;
     let bytes = 0;
-    // Deleting the entry being visited is safe during Set iteration.
-    for (const tile of this.pendingUploads) {
+    // Deleting the entry being visited is safe during Map iteration.
+    for (const [tile, decoded] of this.pendingUploads) {
       this.pendingUploads.delete(tile);
-      const decoded = tile.decoded!;
-      tile.decoded = undefined;
       let payload: PayloadT;
       try {
         payload = this.options.uploadTile(decoded);
@@ -498,7 +496,7 @@ export class TileScheduler<DecodedT, PayloadT> {
   private startLoad(index: TileIndex): void {
     const key = tileKey(index);
     const controller = new AbortController();
-    const tile: SchedulerTile<DecodedT, PayloadT> = this.tiles.get(key) ?? {
+    const tile: SchedulerTile<PayloadT> = this.tiles.get(key) ?? {
       key,
       index,
       state: "loading",
@@ -526,10 +524,9 @@ export class TileScheduler<DecodedT, PayloadT> {
         ) {
           return;
         }
-        tile.decoded = decoded;
         tile.state = "decoded";
         tile.lastUsed = this.frame;
-        this.pendingUploads.add(tile);
+        this.pendingUploads.set(tile, decoded);
         // Drawing it takes a frame: the layer's `prerender` uploads it.
         this.options.onNeedsRepaint?.();
       })
@@ -551,7 +548,7 @@ export class TileScheduler<DecodedT, PayloadT> {
    * Record a failed attempt — a rejected load or a throwing upload — and
    * schedule the retry, or give up once the budget is spent.
    */
-  private fail(tile: SchedulerTile<DecodedT, PayloadT>, error: unknown): void {
+  private fail(tile: SchedulerTile<PayloadT>, error: unknown): void {
     tile.state = "error";
     tile.attempts++;
     const willRetry = tile.attempts <= this.maxRetries;
@@ -586,7 +583,7 @@ export class TileScheduler<DecodedT, PayloadT> {
     selectedFootprints: Footprint[],
   ): void {
     let inFlight = 0;
-    const candidates: SchedulerTile<DecodedT, PayloadT>[] = [];
+    const candidates: SchedulerTile<PayloadT>[] = [];
     for (const tile of this.tiles.values()) {
       if (tile.state !== "loading") {
         continue;
@@ -812,7 +809,7 @@ export function tileKey({ x, y, z }: TileIndex): string {
 }
 
 /** Whether a tile has reached a resting state: loaded, or errored. */
-function isSettled(tile: SchedulerTile<unknown, unknown>): boolean {
+function isSettled(tile: SchedulerTile<unknown>): boolean {
   return tile.state === "loaded" || tile.state === "error";
 }
 

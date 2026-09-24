@@ -459,7 +459,7 @@ function createUnormRenderer(
 
   // Parsed now, so a missing or malformed ColorMap fails while the source is
   // opening; the texture itself waits for `prepare`, inside MapLibre's GL
-  // bracket.
+  // bracket, which consumes this.
   let colormap: ImageData | undefined;
   if (isPalette) {
     if (!colorMap) {
@@ -470,8 +470,6 @@ function createUnormRenderer(
     colormap = parseColormap(colorMap);
   }
   let colormapTexture: WebGLTexture | undefined;
-  // Set before the upload is attempted, so a failure is not retried per frame.
-  let colormapAttempted = false;
 
   const buildPipeline = (textures: GeoTiffTileTextures): RenderPipeline => {
     const pipeline: RenderPipeline = [
@@ -514,17 +512,20 @@ function createUnormRenderer(
   };
 
   return {
-    loadTilePixels: tilePixelLoader({ samplesPerPixel }),
+    loadTilePixels: (image, options) =>
+      fetchTilePixels(image, options, undefined, samplesPerPixel),
     uploadTileTextures: (glContext, pixels) =>
       uploadTileTextures(glContext, pixels, { textureFormat, linearFilter }),
     buildPipeline,
     destroyTileTextures,
     prepare: (glContext) => {
-      if (!colormap || colormapAttempted) {
+      if (!colormap) {
         return;
       }
-      colormapAttempted = true;
-      colormapTexture = createColormapTexture(glContext, colormap);
+      // Consumed before the attempt, so a failure is not retried per frame.
+      const image = colormap;
+      colormap = undefined;
+      colormapTexture = createColormapTexture(glContext, image);
     },
     destroy: (glContext) => {
       if (colormapTexture) {
@@ -653,22 +654,6 @@ function interleaved(array: RasterArray): RasterArrayPixelInterleaved {
     throw new Error("Band-separate images not yet implemented.");
   }
   return array;
-}
-
-/**
- * The decode half of tile loading, shared by every renderer: fetch one tile's
- * pixels, with or without a stitched halo.
- */
-function tilePixelLoader({
-  samplesPerPixel,
-  haloCache,
-}: {
-  samplesPerPixel: number;
-  /** Pad every tile with a halo of neighbour texels, fetched through this cache. */
-  haloCache?: DecodedTileCache;
-}): GeoTiffRenderer["loadTilePixels"] {
-  return (image, options) =>
-    fetchTilePixels(image, options, haloCache, samplesPerPixel);
 }
 
 /**
@@ -953,7 +938,8 @@ function createContourRenderer(
   const haloCache = new DecodedTileCache();
 
   return {
-    loadTilePixels: tilePixelLoader({ samplesPerPixel, haloCache }),
+    loadTilePixels: (image, options) =>
+      fetchTilePixels(image, options, haloCache, samplesPerPixel),
     // Filtering is irrelevant: the seed interpolates with texelFetch.
     uploadTileTextures: (glContext, pixels) =>
       uploadTileTextures(glContext, pixels, {
