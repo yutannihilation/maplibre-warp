@@ -3,8 +3,15 @@
  *
  * This replaces deck.gl's `TileLayer` + `Tileset2D`, which MapLibre gives
  * custom layers no equivalent of. The scheduler is deliberately agnostic about
- * what a "loaded tile" contains — the caller supplies `loadTile` and
+ * what a tile contains — the caller supplies `loadTile`, `uploadTile` and
  * `destroyTile` — so the GPU-resource half stays in the layer.
+ *
+ * A tile's life is `loading` → `decoded` → `loaded`, or `error` from either
+ * of the first two. The split between `decoded` and `loaded` exists because
+ * fetching and decoding finish asynchronously, between frames, where a
+ * MapLibre custom layer must not touch GL; the upload waits for
+ * {@link TileScheduler.uploadPending}, which the layer runs from its
+ * `prerender` hook inside MapLibre's GL-state bracket.
  */
 
 import { commonSpaceFromLngLat } from "./mercator.js";
@@ -14,7 +21,7 @@ import { getTileIndices } from "./tileset/traversal.js";
 import type { Bounds, TileIndex, ZRange } from "./tileset/types.js";
 import type { RasterViewport } from "./tileset/viewport.js";
 
-export type TileState = "loading" | "loaded" | "error";
+export type TileState = "loading" | "decoded" | "loaded" | "error";
 
 /** A tile tracked by the scheduler. */
 export interface SchedulerTile<PayloadT> {
@@ -41,19 +48,30 @@ export interface SchedulerTile<PayloadT> {
   retryAt: number;
 }
 
-export interface TileSchedulerOptions<PayloadT> {
+export interface TileSchedulerOptions<DecodedT, PayloadT> {
   descriptor: RasterTilesetDescriptor;
   /** Dataset extent in WGS84 degrees, `[west, south, east, north]`. */
   wgs84Bounds: Bounds;
-  /** Fetch, decode and upload one tile. */
-  loadTile(index: TileIndex, signal: AbortSignal): Promise<PayloadT>;
+  /**
+   * Fetch and decode one tile. Runs asynchronously, between frames, so it
+   * must not touch GL; that is what {@link uploadTile} is for.
+   */
+  loadTile(index: TileIndex, signal: AbortSignal): Promise<DecodedT>;
+  /**
+   * Turn a decoded tile into a drawable payload: the GPU upload. Called
+   * synchronously from {@link TileScheduler.uploadPending}, which the layer
+   * runs inside MapLibre's custom-layer bracket, so it may leave GL state as
+   * it likes. A throw fails the tile the same way a rejected load does.
+   */
+  uploadTile(decoded: DecodedT): PayloadT;
   /** Release every GPU resource the payload owns. */
   destroyTile(payload: PayloadT): void;
   /** Bytes the payload occupies, used for the cache cap. */
   byteLengthOf(payload: PayloadT): number;
   /**
    * Called when something has changed that the layer should redraw for: a tile
-   * finished loading, or a failed tile's backoff elapsed so a retry is now due.
+   * finished decoding and is waiting to be uploaded, or a failed tile's
+   * backoff elapsed so a retry is now due.
    *
    * The retry case matters because retries are driven by {@link update}, which
    * the layer only calls while repainting. Without this nudge a view whose
@@ -140,6 +158,20 @@ export interface TileSchedulerOptions<PayloadT> {
    * @default 3
    */
   maxRetries?: number;
+  /**
+   * Soft cap on the bytes {@link TileScheduler.uploadPending} uploads in one
+   * frame, measured with `byteLengthOf`. Once a frame's uploads reach it the
+   * rest wait for the next frame, which is requested through
+   * `onNeedsRepaint`. The tile that crosses the cap is still uploaded, so
+   * every frame makes progress however small the cap.
+   *
+   * Without a cap, a burst of tiles that finish decoding together (a fast
+   * zoom over a warm HTTP cache) is uploaded in a single frame, which then
+   * stalls visibly.
+   *
+   * @default 16777216 (16 MiB)
+   */
+  maxUploadBytesPerFrame?: number;
   /** Elevation range in metres, or null for a flat raster. */
   zRange?: ZRange | null;
 }
@@ -173,6 +205,7 @@ export const MAX_STAND_IN_DEPTH = 2;
 const DEFAULT_LOD_BIAS = 0;
 const DEFAULT_RETRY_BASE_DELAY = 1000;
 const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_MAX_UPLOAD_BYTES_PER_FRAME = 16 * 1024 * 1024;
 
 /** A tile the layer should draw this frame, in painter order. */
 export interface DrawableTile<PayloadT> {
@@ -180,7 +213,7 @@ export interface DrawableTile<PayloadT> {
   payload: PayloadT;
 }
 
-export class TileScheduler<PayloadT> {
+export class TileScheduler<DecodedT, PayloadT> {
   private readonly tiles = new Map<string, SchedulerTile<PayloadT>>();
   private readonly boundingVolumeCache = new BoundingVolumeCache();
   private readonly maxCacheByteSize: number;
@@ -189,12 +222,26 @@ export class TileScheduler<PayloadT> {
   private readonly lodBias: number;
   private readonly retryBaseDelay: number;
   private readonly maxRetries: number;
+  private readonly maxUploadBytesPerFrame: number;
   private readonly zRange: ZRange | null;
   private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
+  /**
+   * Tiles in the `decoded` state and their decoded data, in the order they
+   * finished decoding, so {@link uploadPending} need not scan the whole cache
+   * every frame. A decoded tile leaves `tiles` only through {@link destroy},
+   * which clears this too: neither pruning nor eviction touches decoded
+   * tiles.
+   */
+  private readonly pendingUploads = new Map<
+    SchedulerTile<PayloadT>,
+    DecodedT
+  >();
   private frame = 0;
   private destroyed = false;
 
-  constructor(private readonly options: TileSchedulerOptions<PayloadT>) {
+  constructor(
+    private readonly options: TileSchedulerOptions<DecodedT, PayloadT>,
+  ) {
     this.maxCacheByteSize =
       options.maxCacheByteSize ?? DEFAULT_MAX_CACHE_BYTE_SIZE;
     this.maxCacheSize = options.maxCacheSize ?? DEFAULT_MAX_CACHE_SIZE;
@@ -203,6 +250,8 @@ export class TileScheduler<PayloadT> {
     this.lodBias = options.lodBias ?? DEFAULT_LOD_BIAS;
     this.retryBaseDelay = options.retryBaseDelay ?? DEFAULT_RETRY_BASE_DELAY;
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.maxUploadBytesPerFrame =
+      options.maxUploadBytesPerFrame ?? DEFAULT_MAX_UPLOAD_BYTES_PER_FRAME;
     this.zRange = options.zRange ?? null;
   }
 
@@ -220,6 +269,11 @@ export class TileScheduler<PayloadT> {
       }
     }
     return total;
+  }
+
+  /** Number of tiles decoded and waiting for {@link uploadPending}. */
+  get pendingUploadCount(): number {
+    return this.pendingUploads.size;
   }
 
   /** Bytes currently attributed to loaded tiles. */
@@ -289,9 +343,10 @@ export class TileScheduler<PayloadT> {
           this.startLoad(index);
         }
       }
-      // Everything not drawable this frame needs ancestor cover, errored tiles
-      // included. Skipping them left a failed tile's footprint as a permanent
-      // hole showing the basemap, even with its parent overview already loaded.
+      // Everything not drawable this frame needs ancestor cover: tiles still
+      // loading, tiles decoded but not yet uploaded, and errored tiles alike.
+      // Skipping the last left a failed tile's footprint as a permanent hole
+      // showing the basemap, even with its parent overview already loaded.
       missing.push(index);
     }
 
@@ -321,6 +376,51 @@ export class TileScheduler<PayloadT> {
   }
 
   /**
+   * Upload decoded tiles in the order they finished decoding, up to
+   * `maxUploadBytesPerFrame`, making them drawable from the next
+   * {@link update}. Returns how many were uploaded. If any remain, asks for
+   * another frame through `onNeedsRepaint`.
+   *
+   * The layer calls this from `prerender`, inside MapLibre's custom-layer
+   * bracket, so `uploadTile` may change GL state freely. An upload that
+   * throws fails its tile the way a rejected load does: it is reported
+   * through `onTileError` and retried with the same backoff, and the frame
+   * goes on.
+   */
+  uploadPending(): number {
+    if (this.destroyed) {
+      return 0;
+    }
+    let uploaded = 0;
+    let bytes = 0;
+    // Deleting the entry being visited is safe during Map iteration.
+    for (const [tile, decoded] of this.pendingUploads) {
+      this.pendingUploads.delete(tile);
+      let payload: PayloadT;
+      try {
+        payload = this.options.uploadTile(decoded);
+      } catch (error) {
+        this.fail(tile, error);
+        continue;
+      }
+      tile.payload = payload;
+      tile.state = "loaded";
+      tile.byteLength = this.options.byteLengthOf(payload);
+      tile.attempts = 0;
+      tile.retryAt = 0;
+      uploaded++;
+      bytes += tile.byteLength;
+      if (bytes >= this.maxUploadBytesPerFrame) {
+        break;
+      }
+    }
+    if (this.pendingUploads.size > 0) {
+      this.options.onNeedsRepaint?.();
+    }
+    return uploaded;
+  }
+
+  /**
    * Ask the layer to repaint once `delay` has passed, so the retry this frame
    * scheduled actually gets a chance to run.
    */
@@ -334,13 +434,17 @@ export class TileScheduler<PayloadT> {
     this.retryTimers.add(timer);
   }
 
-  /** Abort every in-flight load and free every payload. */
+  /**
+   * Abort every in-flight load and free every payload. Decoded tiles awaiting
+   * upload hold no GPU resources and are simply dropped.
+   */
   destroy(): void {
     this.destroyed = true;
     for (const timer of this.retryTimers) {
       clearTimeout(timer);
     }
     this.retryTimers.clear();
+    this.pendingUploads.clear();
     for (const tile of this.tiles.values()) {
       tile.controller.abort();
       if (tile.payload !== undefined) {
@@ -409,23 +513,21 @@ export class TileScheduler<PayloadT> {
 
     this.options
       .loadTile(index, controller.signal)
-      .then((payload) => {
+      .then((decoded) => {
         // Pruned or evicted while in flight, superseded by a retry, or the
-        // whole scheduler went away: drop the result rather than leaking it.
+        // whole scheduler went away: drop the result. Nothing to release —
+        // a decoded tile holds no GPU resources yet.
         if (
           this.destroyed ||
           this.tiles.get(key) !== tile ||
           tile.controller !== controller
         ) {
-          this.options.destroyTile(payload);
           return;
         }
-        tile.payload = payload;
-        tile.state = "loaded";
-        tile.byteLength = this.options.byteLengthOf(payload);
+        tile.state = "decoded";
         tile.lastUsed = this.frame;
-        tile.attempts = 0;
-        tile.retryAt = 0;
+        this.pendingUploads.set(tile, decoded);
+        // Drawing it takes a frame: the layer's `prerender` uploads it.
         this.options.onNeedsRepaint?.();
       })
       .catch((error: unknown) => {
@@ -438,21 +540,27 @@ export class TileScheduler<PayloadT> {
           this.tiles.delete(key);
           return;
         }
-        tile.state = "error";
-        tile.attempts++;
-        const willRetry = tile.attempts <= this.maxRetries;
-        const delay = this.retryBaseDelay * 2 ** (tile.attempts - 1);
-        tile.retryAt = willRetry
-          ? Date.now() + delay
-          : Number.POSITIVE_INFINITY;
-        if (willRetry) {
-          this.scheduleRetryRepaint(delay);
-        }
-        this.options.onTileError?.(index, error, {
-          attempt: tile.attempts,
-          willRetry,
-        });
+        this.fail(tile, error);
       });
+  }
+
+  /**
+   * Record a failed attempt — a rejected load or a throwing upload — and
+   * schedule the retry, or give up once the budget is spent.
+   */
+  private fail(tile: SchedulerTile<PayloadT>, error: unknown): void {
+    tile.state = "error";
+    tile.attempts++;
+    const willRetry = tile.attempts <= this.maxRetries;
+    const delay = this.retryBaseDelay * 2 ** (tile.attempts - 1);
+    tile.retryAt = willRetry ? Date.now() + delay : Number.POSITIVE_INFINITY;
+    if (willRetry) {
+      this.scheduleRetryRepaint(delay);
+    }
+    this.options.onTileError?.(tile.index, error, {
+      attempt: tile.attempts,
+      willRetry,
+    });
   }
 
   /**
@@ -655,13 +763,15 @@ export class TileScheduler<PayloadT> {
    *
    * Tiles this frame touched — drawn, selected, or an ancestor of a selected
    * tile — are never evicted. Loads in flight are neither counted nor evicted
-   * here; {@link pruneLoads} bounds them.
+   * here; {@link pruneLoads} bounds them. Nor are decoded tiles awaiting
+   * upload: they hold no GPU memory yet, and the next frame's
+   * {@link uploadPending} settles them.
    */
   private evict(inUse: Map<string, DrawableTile<PayloadT>>): void {
     let bytes = 0;
     let count = 0;
     for (const tile of this.tiles.values()) {
-      if (tile.state === "loading") {
+      if (!isSettled(tile)) {
         continue;
       }
       count++;
@@ -674,7 +784,7 @@ export class TileScheduler<PayloadT> {
     const candidates = [...this.tiles.values()]
       .filter(
         (tile) =>
-          tile.state !== "loading" &&
+          isSettled(tile) &&
           !inUse.has(tile.key) &&
           tile.lastUsed !== this.frame,
       )
@@ -696,6 +806,11 @@ export class TileScheduler<PayloadT> {
 
 export function tileKey({ x, y, z }: TileIndex): string {
   return `${z}/${x}/${y}`;
+}
+
+/** Whether a tile has reached a resting state: loaded, or errored. */
+function isSettled(tile: SchedulerTile<unknown>): boolean {
+  return tile.state === "loaded" || tile.state === "error";
 }
 
 /** A tile's level and its extent in the source CRS. */

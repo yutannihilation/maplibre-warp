@@ -22,6 +22,7 @@ export { projectionFromVariant } from "./projection.js";
 export type {
   RasterCustomLayerProps,
   RasterSource,
+  RasterTileData,
   RasterTilePayload,
 } from "./raster-custom-layer.js";
 export {

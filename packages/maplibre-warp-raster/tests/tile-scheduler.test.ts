@@ -127,6 +127,8 @@ describe("TileScheduler", () => {
   let destroyed: TileIndex[];
   /** Every `loadTile` call, in order, as `z/x/y`. */
   let calls: string[];
+  /** The scheduler {@link makeScheduler} built last, for {@link settle}. */
+  let current: TileScheduler<FakePayload, FakePayload>;
 
   beforeEach(() => {
     resolvers = new Map();
@@ -138,7 +140,7 @@ describe("TileScheduler", () => {
   function makeScheduler(
     overrides: Partial<
       Pick<
-        TileSchedulerOptions<FakePayload>,
+        TileSchedulerOptions<FakePayload, FakePayload>,
         | "descriptor"
         | "maxCacheByteSize"
         | "maxCacheSize"
@@ -147,7 +149,7 @@ describe("TileScheduler", () => {
       >
     > = {},
   ) {
-    return new TileScheduler<FakePayload>({
+    current = new TileScheduler<FakePayload, FakePayload>({
       descriptor,
       wgs84Bounds,
       ...overrides,
@@ -165,17 +167,23 @@ describe("TileScheduler", () => {
         payload.destroyed = true;
         destroyed.push(payload.index);
       },
+      uploadTile: (decoded) => decoded,
       byteLengthOf: () => 1000,
     });
+    return current;
   }
 
-  function settle(key: string): Promise<void> {
+  /**
+   * Finish a load: resolve it, let the scheduler's `.then` run, then upload
+   * as the layer's `prerender` does before every `update`.
+   */
+  async function settle(key: string): Promise<void> {
     const resolve = resolvers.get(key);
     expect(resolve, `no pending load for ${key}`).toBeDefined();
     resolve!({ index: parseKey(key), destroyed: false });
     resolvers.delete(key);
-    // Let the scheduler's `.then` run.
-    return Promise.resolve().then(() => undefined);
+    await Promise.resolve();
+    current.uploadPending();
   }
 
   it("requests every selected tile exactly once", () => {
@@ -418,12 +426,13 @@ describe("TileScheduler", () => {
     });
   });
 
-  it("destroys a payload that arrives after its tile was pruned", async () => {
+  it("drops a tile that finishes decoding after it was pruned, without uploading it", async () => {
     // A loader that ignores its abort signal — a decoder already past the
-    // point of no return, which is exactly when a payload can outlive its
-    // tile entry and leak GPU memory.
+    // point of no return, which is exactly when a result can outlive its
+    // tile entry. It must neither be uploaded nor linger as pending.
     let resolveLate: ((payload: FakePayload) => void) | undefined;
-    const scheduler = new TileScheduler<FakePayload>({
+    const uploaded: TileIndex[] = [];
+    const scheduler = new TileScheduler<FakePayload, FakePayload>({
       descriptor,
       wgs84Bounds,
       maxConcurrentRequests: 0,
@@ -433,6 +442,10 @@ describe("TileScheduler", () => {
             resolveLate = resolve;
           }
         }),
+      uploadTile: (decoded) => {
+        uploaded.push(decoded.index);
+        return decoded;
+      },
       destroyTile: (payload) => {
         payload.destroyed = true;
       },
@@ -447,23 +460,22 @@ describe("TileScheduler", () => {
     scheduler.update(makeViewport(11, 60000));
     scheduler.update(makeViewport(11, 60000));
 
-    const payload: FakePayload = {
-      index: { x: 1, y: 0, z: 1 },
-      destroyed: false,
-    };
-    resolveLate!(payload);
+    resolveLate!({ index: { x: 1, y: 0, z: 1 }, destroyed: false });
     await Promise.resolve();
     await Promise.resolve();
-    expect(payload.destroyed).toBe(true);
+    expect(scheduler.pendingUploadCount).toBe(0);
+    scheduler.uploadPending();
+    expect(uploaded).toEqual([]);
   });
 
   it("reports a load failure once and does not retry it", async () => {
     const onTileError = vi.fn();
-    const scheduler = new TileScheduler<FakePayload>({
+    const scheduler = new TileScheduler<FakePayload, FakePayload>({
       descriptor,
       wgs84Bounds,
       loadTile: () => Promise.reject(new Error("boom")),
       destroyTile: () => undefined,
+      uploadTile: (decoded) => decoded,
       byteLengthOf: () => 0,
       onTileError,
     });
@@ -511,10 +523,10 @@ describe("TileScheduler failure handling", () => {
     failFor: (key: string, attempt: number) => boolean;
     retryBaseDelay?: number;
     maxRetries?: number;
-    onTileError?: TileSchedulerOptions<FakePayload>["onTileError"];
+    onTileError?: TileSchedulerOptions<FakePayload, FakePayload>["onTileError"];
   }) {
     const calls: string[] = [];
-    const scheduler = new TileScheduler<FakePayload>({
+    const scheduler = new TileScheduler<FakePayload, FakePayload>({
       descriptor,
       wgs84Bounds,
       retryBaseDelay: opts.retryBaseDelay ?? 0,
@@ -529,6 +541,7 @@ describe("TileScheduler failure handling", () => {
           : Promise.resolve({ index, destroyed: false });
       },
       destroyTile: () => undefined,
+      uploadTile: (decoded) => decoded,
       byteLengthOf: () => 1000,
     });
     const callsFor = (key: string) => calls.filter((k) => k === key).length;
@@ -544,6 +557,7 @@ describe("TileScheduler failure handling", () => {
 
     scheduler.update(makeViewport(4));
     await flush();
+    scheduler.uploadPending();
     scheduler.update(makeViewport(4));
 
     // Zoom in: all four level-1 tiles fail, so the loaded level-0 tile must
@@ -572,6 +586,7 @@ describe("TileScheduler failure handling", () => {
     expect(callsFor("0/0/0")).toBe(2);
 
     // The retry succeeded, so the tile now draws and is not requested again.
+    scheduler.uploadPending();
     const drawn = scheduler.update(makeViewport(4));
     expect(drawn.map((t) => t.index)).toEqual([{ x: 0, y: 0, z: 0 }]);
     expect(callsFor("0/0/0")).toBe(2);
@@ -635,13 +650,14 @@ describe("TileScheduler failure handling", () => {
     vi.useFakeTimers();
     try {
       const onNeedsRepaint = vi.fn();
-      const scheduler = new TileScheduler<FakePayload>({
+      const scheduler = new TileScheduler<FakePayload, FakePayload>({
         descriptor,
         wgs84Bounds,
         retryBaseDelay: 1000,
         maxRetries: 1,
         loadTile: () => Promise.reject(new Error("boom")),
         destroyTile: () => undefined,
+        uploadTile: (decoded) => decoded,
         byteLengthOf: () => 0,
         onNeedsRepaint,
       });
@@ -665,12 +681,13 @@ describe("TileScheduler failure handling", () => {
     vi.useFakeTimers();
     try {
       const onNeedsRepaint = vi.fn();
-      const scheduler = new TileScheduler<FakePayload>({
+      const scheduler = new TileScheduler<FakePayload, FakePayload>({
         descriptor,
         wgs84Bounds,
         retryBaseDelay: 1000,
         loadTile: () => Promise.reject(new Error("boom")),
         destroyTile: () => undefined,
+        uploadTile: (decoded) => decoded,
         byteLengthOf: () => 0,
         onNeedsRepaint,
       });
@@ -707,5 +724,196 @@ describe("TileScheduler failure handling", () => {
       attempt: 2,
       willRetry: false,
     });
+  });
+});
+
+describe("TileScheduler upload", () => {
+  const descriptor = makeDescriptor();
+  const wgs84Bounds: Bounds = [-180, -85, 180, 85];
+  const keyOf = (index: TileIndex) => `${index.z}/${index.x}/${index.y}`;
+
+  /**
+   * A scheduler whose loads resolve on demand through `decode`, with every
+   * upload and destroy recorded. Uploads are the identity unless overridden.
+   */
+  function makeUploadingScheduler(
+    opts: {
+      uploadTile?: (decoded: FakePayload) => FakePayload;
+      onTileError?: TileSchedulerOptions<
+        FakePayload,
+        FakePayload
+      >["onTileError"];
+      onNeedsRepaint?: () => void;
+      maxUploadBytesPerFrame?: number;
+    } = {},
+  ) {
+    const resolvers = new Map<string, (payload: FakePayload) => void>();
+    const uploaded: string[] = [];
+    const destroyed: string[] = [];
+    const scheduler = new TileScheduler<FakePayload, FakePayload>({
+      descriptor,
+      wgs84Bounds,
+      retryBaseDelay: 0,
+      onTileError: opts.onTileError,
+      onNeedsRepaint: opts.onNeedsRepaint,
+      maxUploadBytesPerFrame: opts.maxUploadBytesPerFrame,
+      loadTile: (index) =>
+        new Promise<FakePayload>((resolve) => {
+          resolvers.set(keyOf(index), resolve);
+        }),
+      uploadTile: (decoded) => {
+        uploaded.push(keyOf(decoded.index));
+        return (opts.uploadTile ?? ((d) => d))(decoded);
+      },
+      destroyTile: (payload) => {
+        destroyed.push(keyOf(payload.index));
+      },
+      byteLengthOf: () => 1000,
+    });
+    /** Resolve the load for `key` and let the scheduler's `.then` run. */
+    async function decode(key: string): Promise<void> {
+      const resolve = resolvers.get(key);
+      expect(resolve, `no pending load for ${key}`).toBeDefined();
+      resolve!({ index: parseKey(key), destroyed: false });
+      resolvers.delete(key);
+      await flush();
+    }
+    return { scheduler, decode, uploaded, destroyed };
+  }
+
+  it("draws a decoded tile only after uploadPending has run", async () => {
+    const { scheduler, decode, uploaded } = makeUploadingScheduler();
+    scheduler.update(makeViewport(4));
+    await decode("0/0/0");
+
+    // Decoded, but the GPU half waits for the layer's `prerender`: nothing
+    // may touch GL between frames.
+    expect(scheduler.pendingUploadCount).toBe(1);
+    expect(scheduler.update(makeViewport(4))).toEqual([]);
+    expect(uploaded).toEqual([]);
+
+    expect(scheduler.uploadPending()).toBe(1);
+    expect(uploaded).toEqual(["0/0/0"]);
+    expect(scheduler.pendingUploadCount).toBe(0);
+    expect(scheduler.update(makeViewport(4)).map((t) => t.index)).toEqual([
+      { x: 0, y: 0, z: 0 },
+    ]);
+    // Nothing left for the next frame.
+    expect(scheduler.uploadPending()).toBe(0);
+  });
+
+  it("stands in with a loaded ancestor for a tile awaiting upload", async () => {
+    const { scheduler, decode } = makeUploadingScheduler();
+    scheduler.update(makeViewport(4));
+    await decode("0/0/0");
+    scheduler.uploadPending();
+    scheduler.update(makeViewport(11));
+    await decode("1/0/0");
+
+    // Exactly as while loading: the ancestor covers until the upload lands.
+    const drawn = scheduler.update(makeViewport(11));
+    expect(drawn.map((t) => t.index)).toEqual([{ x: 0, y: 0, z: 0 }]);
+
+    scheduler.uploadPending();
+    const after = scheduler.update(makeViewport(11));
+    expect(after.map((t) => t.index.z)).toEqual([0, 1]);
+  });
+
+  it("asks for a repaint when a tile finishes decoding, not again when it uploads", async () => {
+    const onNeedsRepaint = vi.fn();
+    const { scheduler, decode } = makeUploadingScheduler({ onNeedsRepaint });
+    scheduler.update(makeViewport(4));
+    await decode("0/0/0");
+    // That repaint is the frame whose `prerender` uploads the tile.
+    expect(onNeedsRepaint).toHaveBeenCalledTimes(1);
+    scheduler.uploadPending();
+    expect(onNeedsRepaint).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails a tile whose upload throws and retries it like a failed load", async () => {
+    const onTileError = vi.fn();
+    let uploads = 0;
+    const { scheduler, decode } = makeUploadingScheduler({
+      onTileError,
+      uploadTile: (decoded) => {
+        if (++uploads === 1) {
+          throw new Error("texture allocation failed");
+        }
+        return decoded;
+      },
+    });
+    scheduler.update(makeViewport(4));
+    await decode("0/0/0");
+
+    // The frame goes on: the throw is reported, not propagated out of
+    // `prerender` where it would take MapLibre's render loop down with it.
+    expect(scheduler.uploadPending()).toBe(0);
+    expect(onTileError).toHaveBeenCalledTimes(1);
+    expect(onTileError.mock.calls[0]?.[2]).toEqual({
+      attempt: 1,
+      willRetry: true,
+    });
+
+    // retryBaseDelay is 0, so this frame re-requests the tile.
+    expect(scheduler.update(makeViewport(4))).toEqual([]);
+    await decode("0/0/0");
+    expect(scheduler.uploadPending()).toBe(1);
+    expect(scheduler.update(makeViewport(4)).map((t) => t.index)).toEqual([
+      { x: 0, y: 0, z: 0 },
+    ]);
+  });
+
+  it("spreads uploads over frames once the per-frame byte cap is reached", async () => {
+    const onNeedsRepaint = vi.fn();
+    // Every payload is 1000 bytes, so a 1500-byte cap fits one tile and the
+    // one that crosses it: two per frame.
+    const { scheduler, decode, uploaded } = makeUploadingScheduler({
+      onNeedsRepaint,
+      maxUploadBytesPerFrame: 1500,
+    });
+    scheduler.update(makeViewport(11));
+    const order = ["1/1/1", "1/0/0", "1/1/0", "1/0/1"];
+    for (const key of order) {
+      await decode(key);
+    }
+    expect(scheduler.pendingUploadCount).toBe(4);
+    onNeedsRepaint.mockClear();
+
+    expect(scheduler.uploadPending()).toBe(2);
+    // In the order they finished decoding, not cache order.
+    expect(uploaded).toEqual(order.slice(0, 2));
+    // Work remains, so the next frame is requested.
+    expect(onNeedsRepaint).toHaveBeenCalledTimes(1);
+
+    expect(scheduler.uploadPending()).toBe(2);
+    expect(uploaded).toEqual(order);
+    // Nothing left: no further frame is asked for.
+    expect(onNeedsRepaint).toHaveBeenCalledTimes(1);
+    expect(scheduler.pendingUploadCount).toBe(0);
+  });
+
+  it("uploads at least one tile per frame however small the cap", async () => {
+    const { scheduler, decode } = makeUploadingScheduler({
+      maxUploadBytesPerFrame: 0,
+    });
+    scheduler.update(makeViewport(11));
+    for (const key of ["1/0/0", "1/0/1"]) {
+      await decode(key);
+    }
+    expect(scheduler.uploadPending()).toBe(1);
+    expect(scheduler.uploadPending()).toBe(1);
+    expect(scheduler.uploadPending()).toBe(0);
+  });
+
+  it("drops decoded tiles on destroy without uploading or destroying them", async () => {
+    const { scheduler, decode, uploaded, destroyed } = makeUploadingScheduler();
+    scheduler.update(makeViewport(4));
+    await decode("0/0/0");
+
+    scheduler.destroy();
+    expect(scheduler.uploadPending()).toBe(0);
+    expect(uploaded).toEqual([]);
+    // Nothing was ever on the GPU, so there is nothing to release.
+    expect(destroyed).toEqual([]);
   });
 });

@@ -13,6 +13,7 @@ export type {
   ContourLineOptions,
   ContourRenderOptions,
   GeoTiffRenderer,
+  GeoTiffTilePixels,
   GeoTiffTileTextures,
   ResolvedContourOptions,
 } from "./render-pipeline.js";
