@@ -744,6 +744,7 @@ describe("TileScheduler upload", () => {
         FakePayload
       >["onTileError"];
       onNeedsRepaint?: () => void;
+      maxUploadBytesPerFrame?: number;
     } = {},
   ) {
     const resolvers = new Map<string, (payload: FakePayload) => void>();
@@ -755,6 +756,7 @@ describe("TileScheduler upload", () => {
       retryBaseDelay: 0,
       onTileError: opts.onTileError,
       onNeedsRepaint: opts.onNeedsRepaint,
+      maxUploadBytesPerFrame: opts.maxUploadBytesPerFrame,
       loadTile: (index) =>
         new Promise<FakePayload>((resolve) => {
           resolvers.set(keyOf(index), resolve);
@@ -859,6 +861,48 @@ describe("TileScheduler upload", () => {
     expect(scheduler.update(makeViewport(4)).map((t) => t.index)).toEqual([
       { x: 0, y: 0, z: 0 },
     ]);
+  });
+
+  it("spreads uploads over frames once the per-frame byte cap is reached", async () => {
+    const onNeedsRepaint = vi.fn();
+    // Every payload is 1000 bytes, so a 1500-byte cap fits one tile and the
+    // one that crosses it: two per frame.
+    const { scheduler, decode, uploaded } = makeUploadingScheduler({
+      onNeedsRepaint,
+      maxUploadBytesPerFrame: 1500,
+    });
+    scheduler.update(makeViewport(11));
+    const order = ["1/1/1", "1/0/0", "1/1/0", "1/0/1"];
+    for (const key of order) {
+      await decode(key);
+    }
+    expect(scheduler.pendingUploadCount).toBe(4);
+    onNeedsRepaint.mockClear();
+
+    expect(scheduler.uploadPending()).toBe(2);
+    // In the order they finished decoding, not cache order.
+    expect(uploaded).toEqual(order.slice(0, 2));
+    // Work remains, so the next frame is requested.
+    expect(onNeedsRepaint).toHaveBeenCalledTimes(1);
+
+    expect(scheduler.uploadPending()).toBe(2);
+    expect(uploaded).toEqual(order);
+    // Nothing left: no further frame is asked for.
+    expect(onNeedsRepaint).toHaveBeenCalledTimes(1);
+    expect(scheduler.pendingUploadCount).toBe(0);
+  });
+
+  it("uploads at least one tile per frame however small the cap", async () => {
+    const { scheduler, decode } = makeUploadingScheduler({
+      maxUploadBytesPerFrame: 0,
+    });
+    scheduler.update(makeViewport(11));
+    for (const key of ["1/0/0", "1/0/1"]) {
+      await decode(key);
+    }
+    expect(scheduler.uploadPending()).toBe(1);
+    expect(scheduler.uploadPending()).toBe(1);
+    expect(scheduler.uploadPending()).toBe(0);
   });
 
   it("drops decoded tiles on destroy without uploading or destroying them", async () => {

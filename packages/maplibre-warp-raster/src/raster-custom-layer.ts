@@ -116,6 +116,14 @@ export interface RasterCustomLayerProps {
    * @default 3
    */
   maxRetries?: number;
+  /**
+   * Soft cap on GPU bytes uploaded per frame. Tiles that finish decoding
+   * together are spread over several frames instead of stalling one; at
+   * least one tile is uploaded per frame whatever the cap.
+   *
+   * @default 16777216 (16 MiB)
+   */
+  maxUploadBytesPerFrame?: number;
 }
 
 /**
@@ -162,7 +170,7 @@ export interface RasterCustomLayerProps {
  * per value — and `getParameter` stalls the pipeline on many drivers.
  *
  * - {@link prerender} uploads the tiles that finished decoding since the last
- *   frame (`TileScheduler.uploadPending`). Fetching and decoding run
+ *   frame (`TileScheduler.uploadPending`), up to `maxUploadBytesPerFrame`. Fetching and decoding run
  *   asynchronously between frames, but hand back CPU-side data; the GPU half
  *   is {@link RasterTileData.upload}, and it runs here. Defining `prerender`
  *   is also what opts the layer into MapLibre's offscreen pass, which runs
@@ -199,6 +207,7 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
   private readonly lodBias: number | undefined;
   private readonly retryBaseDelay: number;
   private readonly maxRetries: number;
+  private readonly maxUploadBytesPerFrame: number | undefined;
   private readonly zRange: ZRange | null;
 
   constructor(props: RasterCustomLayerProps) {
@@ -210,6 +219,7 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     this.lodBias = props.lodBias;
     this.retryBaseDelay = props.retryBaseDelay ?? DEFAULT_RETRY_BASE_DELAY;
     this.maxRetries = props.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.maxUploadBytesPerFrame = props.maxUploadBytesPerFrame;
     this.zRange = props.zRange ?? null;
   }
 
@@ -327,6 +337,7 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
       lodBias: this.lodBias,
       retryBaseDelay: this.retryBaseDelay,
       maxRetries: this.maxRetries,
+      maxUploadBytesPerFrame: this.maxUploadBytesPerFrame,
       loadTile: (index, signal) => source.loadTile(index, { signal }),
       uploadTile: (data) => data.upload(gl),
       destroyTile: (payload) => payload.destroy(gl),

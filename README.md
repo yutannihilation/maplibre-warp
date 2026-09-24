@@ -210,7 +210,9 @@ those hooks, and none of it saves or restores state — that would only
 duplicate work MapLibre has already committed to, at a `gl.getParameter` stall
 per value. Tiles are fetched, decoded and meshed asynchronously between frames,
 but that stage hands back CPU-side data only; the GPU upload waits for the
-layer's `prerender`, which MapLibre runs before `render` in the same frame.
+layer's `prerender`, which MapLibre runs before `render` in the same frame,
+capped at `maxUploadBytesPerFrame` so a burst of arrivals is spread over
+several frames.
 Layer-wide textures (a palette's colormap, the contour colours) are created
 there too, which is why `setContour` takes effect on the next frame.
 

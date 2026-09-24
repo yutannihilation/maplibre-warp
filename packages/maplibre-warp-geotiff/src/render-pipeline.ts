@@ -378,6 +378,12 @@ export interface GeoTiffRenderer {
    * {@link updateContour}. Cheap when nothing is pending. Bracket-only; run
    * it before {@link uploadTileTextures} and {@link buildPipeline} each
    * frame.
+   *
+   * Throws if a texture cannot be created. The attempted work is consumed
+   * either way, so a failure surfaces once instead of on every frame: a
+   * failed re-style keeps the previous style, and a failed first `prepare`
+   * leaves {@link buildPipeline} throwing until a later
+   * {@link updateContour} is applied successfully.
    */
   prepare(gl: WebGL2RenderingContext): void;
   /** Release layer-wide resources such as the colormap texture. */
@@ -464,6 +470,8 @@ function createUnormRenderer(
     colormap = parseColormap(colorMap);
   }
   let colormapTexture: WebGLTexture | undefined;
+  // Set before the upload is attempted, so a failure is not retried per frame.
+  let colormapAttempted = false;
 
   const buildPipeline = (textures: GeoTiffTileTextures): RenderPipeline => {
     const pipeline: RenderPipeline = [
@@ -512,9 +520,11 @@ function createUnormRenderer(
     buildPipeline,
     destroyTileTextures,
     prepare: (glContext) => {
-      if (colormap && !colormapTexture) {
-        colormapTexture = createColormapTexture(glContext, colormap);
+      if (!colormap || colormapAttempted) {
+        return;
       }
+      colormapAttempted = true;
+      colormapTexture = createColormapTexture(glContext, colormap);
     },
     destroy: (glContext) => {
       if (colormapTexture) {
@@ -920,14 +930,17 @@ function createContourRenderer(
     if (!pending) {
       return;
     }
+    // Consumed before the attempt, so a failure is reported once rather than
+    // rethrown on every frame.
+    const next = pending;
+    pending = null;
     // Create the new textures before deleting the old: if that fails the
     // tiles keep a live texture and consistent (old) props.
-    const nextStyle = createStyle(glContext, pending);
+    const nextStyle = createStyle(glContext, next);
     if (style) {
       destroyStyle(glContext, style);
     }
     style = nextStyle;
-    pending = null;
     // In place, since each array is the one its tile's payload holds.
     for (const [textures, pipeline] of live) {
       pipeline.splice(0, pipeline.length, ...modulesFor(textures));

@@ -21,7 +21,10 @@ import type {
   RasterCustomLayerProps,
   RasterSource,
   RasterTileData,
+  RasterTilePayload,
+  RenderPipeline,
   TileIndex,
+  TileMeshData,
 } from "@yutannihilation/maplibre-warp-raster";
 import {
   buildTileMesh,
@@ -42,6 +45,7 @@ import type {
   ContourGradient,
   ContourRenderOptions,
   GeoTiffRenderer,
+  GeoTiffTilePixels,
   ResolvedContourOptions,
 } from "./render-pipeline.js";
 import {
@@ -183,6 +187,9 @@ export class COGLayer extends RasterCustomLayer {
    * frame, which this schedules; a new module chain is compiled on demand.
    * Applies at `onAdd` if the layer is not on a map yet.
    *
+   * The new colour textures are created in that frame's `prerender`. If that
+   * fails the error is logged and the previous style stays.
+   *
    * Refused with a `RangeError`: any option that fails the constructor's
    * validation, a layer created without `contour` (its tiles hold imagery
    * textures, not values), and changing `band`. Recreate the layer for
@@ -217,12 +224,26 @@ export class COGLayer extends RasterCustomLayer {
    * Before the tile uploads: create or replace the renderer's layer-wide
    * textures (a palette's colormap, the contour colours), so the tiles built
    * this frame can reference them.
+   *
+   * A failure is logged, not rethrown: out of `prerender` it would escape
+   * MapLibre's render loop and take every layer's frame down with it.
+   * `prepare` consumes the work it attempted, so this logs once per failed
+   * change rather than once per frame. If the very first `prepare` failed,
+   * tile uploads then fail through the scheduler's bounded retry path, since
+   * `buildPipeline` has nothing to build from.
    */
   override prerender(
     gl: WebGL2RenderingContext,
     args: CustomRenderMethodInput,
   ): void {
-    this.renderer?.prepare(gl);
+    try {
+      this.renderer?.prepare(gl);
+    } catch (error) {
+      console.error(
+        `[${this.id}] failed to create the layer's textures`,
+        error,
+      );
+    }
     super.prerender(gl, args);
   }
 
@@ -395,30 +416,49 @@ export class COGLayer extends RasterCustomLayer {
         { maxError, initialTriangulation },
       );
 
-      return {
-        upload: (gl) => {
-          const textures = renderer.uploadTileTextures(gl, pixels);
-          let mesh: GpuMesh;
-          try {
-            mesh = new GpuMesh(gl, meshData);
-          } catch (error) {
-            renderer.destroyTileTextures(gl, textures);
-            throw error;
-          }
-          const pipeline = renderer.buildPipeline(textures);
-          return {
-            mesh,
-            pipeline,
-            byteLength: textures.byteLength + meshData.byteLength,
-            destroy: (glContext) => {
-              mesh.destroy(glContext);
-              renderer.destroyTileTextures(glContext, textures);
-            },
-          };
-        },
-      };
+      return { upload: (gl) => uploadTile(gl, renderer, pixels, meshData) };
     };
 
     return { descriptor, wgs84Bounds, loadTile };
   }
+}
+
+/**
+ * Upload one decoded tile: textures, mesh and module chain.
+ *
+ * A module-level function rather than a closure inside the loader, so that
+ * the payload's `destroy` captures only the GPU handles. Nested in the
+ * loader, it would share the loader's closure context and keep the tile's
+ * decoded pixels and mesh arrays alive for as long as the tile stays cached.
+ *
+ * Anything created before a throw is released, so a failed upload leaks
+ * nothing however often the scheduler retries it.
+ */
+function uploadTile(
+  gl: WebGL2RenderingContext,
+  renderer: GeoTiffRenderer,
+  pixels: GeoTiffTilePixels,
+  meshData: TileMeshData,
+): RasterTilePayload {
+  const textures = renderer.uploadTileTextures(gl, pixels);
+  let mesh: GpuMesh | undefined;
+  let pipeline: RenderPipeline;
+  try {
+    mesh = new GpuMesh(gl, meshData);
+    pipeline = renderer.buildPipeline(textures);
+  } catch (error) {
+    mesh?.destroy(gl);
+    renderer.destroyTileTextures(gl, textures);
+    throw error;
+  }
+  const gpuMesh = mesh;
+  return {
+    mesh: gpuMesh,
+    pipeline,
+    byteLength: textures.byteLength + meshData.byteLength,
+    destroy: (glContext) => {
+      gpuMesh.destroy(glContext);
+      renderer.destroyTileTextures(glContext, textures);
+    },
+  };
 }

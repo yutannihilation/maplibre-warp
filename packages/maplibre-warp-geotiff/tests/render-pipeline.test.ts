@@ -509,6 +509,61 @@ describe("inferRenderPipeline with contour", () => {
       expect(created).toBe(2);
     });
 
+    /** A stub GL whose `createTexture` fails while `failing.on` is set. */
+    function flakyGl() {
+      const failing = { on: false };
+      const gl = new Proxy(stubGl(), {
+        get: (target, name: string) =>
+          name === "createTexture"
+            ? () => (failing.on ? null : { name: "texture" })
+            : target[name as keyof WebGL2RenderingContext],
+      });
+      return { gl, failing };
+    }
+
+    it("reports a failed re-style once and keeps the previous style", () => {
+      const { gl, failing } = flakyGl();
+      const renderer = preparedRenderer(geotiff, gl, { contour });
+      const built = renderer.buildPipeline(textures);
+      const oldFill = built[1]!.props;
+
+      renderer.updateContour!(
+        resolveContourOptions({ ...contour, lines: false }),
+      );
+      failing.on = true;
+      expect(() => renderer.prepare(gl)).toThrow(/Failed to create/);
+      // Consumed: the next frame's prepare does not throw again.
+      expect(() => renderer.prepare(gl)).not.toThrow();
+      expect(moduleNames(built)).toEqual([
+        "value-texture-float",
+        "isoband",
+        "contour-line",
+      ]);
+      expect(built[1]!.props).toBe(oldFill);
+
+      // A later change still applies once textures can be created again.
+      failing.on = false;
+      renderer.updateContour!(
+        resolveContourOptions({ ...contour, lines: false }),
+      );
+      renderer.prepare(gl);
+      expect(moduleNames(built)).toEqual(["value-texture-float", "isoband"]);
+    });
+
+    it("reports a failed first prepare once and recovers on the next change", () => {
+      const { gl, failing } = flakyGl();
+      const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      failing.on = true;
+      expect(() => renderer.prepare(gl)).toThrow(/Failed to create/);
+      expect(() => renderer.prepare(gl)).not.toThrow();
+      expect(() => renderer.buildPipeline(textures)).toThrow(/prepare\(gl\)/);
+
+      failing.on = false;
+      renderer.updateContour!(resolveContourOptions(contour));
+      renderer.prepare(gl);
+      expect(moduleNames(renderer.buildPipeline(textures))[1]).toBe("isoband");
+    });
+
     it("is absent from the imagery renderer", () => {
       const renderer = preparedRenderer(
         fakeGeoTiff({ sampleFormat: SampleFormat.Uint, bitsPerSample: 8 }),

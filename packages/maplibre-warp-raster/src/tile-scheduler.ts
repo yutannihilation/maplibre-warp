@@ -160,6 +160,20 @@ export interface TileSchedulerOptions<DecodedT, PayloadT> {
    * @default 3
    */
   maxRetries?: number;
+  /**
+   * Soft cap on the bytes {@link TileScheduler.uploadPending} uploads in one
+   * frame, measured with `byteLengthOf`. Once a frame's uploads reach it the
+   * rest wait for the next frame, which is requested through
+   * `onNeedsRepaint`. The tile that crosses the cap is still uploaded, so
+   * every frame makes progress however small the cap.
+   *
+   * Without a cap, a burst of tiles that finish decoding together (a fast
+   * zoom over a warm HTTP cache) is uploaded in a single frame, which then
+   * stalls visibly.
+   *
+   * @default 16777216 (16 MiB)
+   */
+  maxUploadBytesPerFrame?: number;
   /** Elevation range in metres, or null for a flat raster. */
   zRange?: ZRange | null;
 }
@@ -193,6 +207,7 @@ export const MAX_STAND_IN_DEPTH = 2;
 const DEFAULT_LOD_BIAS = 0;
 const DEFAULT_RETRY_BASE_DELAY = 1000;
 const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_MAX_UPLOAD_BYTES_PER_FRAME = 16 * 1024 * 1024;
 
 /** A tile the layer should draw this frame, in painter order. */
 export interface DrawableTile<PayloadT> {
@@ -209,8 +224,18 @@ export class TileScheduler<DecodedT, PayloadT> {
   private readonly lodBias: number;
   private readonly retryBaseDelay: number;
   private readonly maxRetries: number;
+  private readonly maxUploadBytesPerFrame: number;
   private readonly zRange: ZRange | null;
   private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
+  /**
+   * Decoded tiles awaiting upload, in the order they finished decoding, so
+   * {@link uploadPending} need not scan the whole cache every frame. A
+   * decoded tile leaves `tiles` only through {@link destroy}, which clears
+   * this too: neither pruning nor eviction touches decoded tiles.
+   */
+  private readonly pendingUploads = new Set<
+    SchedulerTile<DecodedT, PayloadT>
+  >();
   private frame = 0;
   private destroyed = false;
 
@@ -225,6 +250,8 @@ export class TileScheduler<DecodedT, PayloadT> {
     this.lodBias = options.lodBias ?? DEFAULT_LOD_BIAS;
     this.retryBaseDelay = options.retryBaseDelay ?? DEFAULT_RETRY_BASE_DELAY;
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.maxUploadBytesPerFrame =
+      options.maxUploadBytesPerFrame ?? DEFAULT_MAX_UPLOAD_BYTES_PER_FRAME;
     this.zRange = options.zRange ?? null;
   }
 
@@ -246,13 +273,7 @@ export class TileScheduler<DecodedT, PayloadT> {
 
   /** Number of tiles decoded and waiting for {@link uploadPending}. */
   get pendingUploadCount(): number {
-    let total = 0;
-    for (const tile of this.tiles.values()) {
-      if (tile.state === "decoded") {
-        total++;
-      }
-    }
-    return total;
+    return this.pendingUploads.size;
   }
 
   /** Bytes currently attributed to loaded tiles. */
@@ -355,8 +376,10 @@ export class TileScheduler<DecodedT, PayloadT> {
   }
 
   /**
-   * Upload every decoded tile, making it drawable from the next
-   * {@link update}. Returns how many were uploaded.
+   * Upload decoded tiles in the order they finished decoding, up to
+   * `maxUploadBytesPerFrame`, making them drawable from the next
+   * {@link update}. Returns how many were uploaded. If any remain, asks for
+   * another frame through `onNeedsRepaint`.
    *
    * The layer calls this from `prerender`, inside MapLibre's custom-layer
    * bracket, so `uploadTile` may change GL state freely. An upload that
@@ -369,10 +392,10 @@ export class TileScheduler<DecodedT, PayloadT> {
       return 0;
     }
     let uploaded = 0;
-    for (const tile of this.tiles.values()) {
-      if (tile.state !== "decoded") {
-        continue;
-      }
+    let bytes = 0;
+    // Deleting the entry being visited is safe during Set iteration.
+    for (const tile of this.pendingUploads) {
+      this.pendingUploads.delete(tile);
       const decoded = tile.decoded!;
       tile.decoded = undefined;
       let payload: PayloadT;
@@ -388,6 +411,13 @@ export class TileScheduler<DecodedT, PayloadT> {
       tile.attempts = 0;
       tile.retryAt = 0;
       uploaded++;
+      bytes += tile.byteLength;
+      if (bytes >= this.maxUploadBytesPerFrame) {
+        break;
+      }
+    }
+    if (this.pendingUploads.size > 0) {
+      this.options.onNeedsRepaint?.();
     }
     return uploaded;
   }
@@ -416,6 +446,7 @@ export class TileScheduler<DecodedT, PayloadT> {
       clearTimeout(timer);
     }
     this.retryTimers.clear();
+    this.pendingUploads.clear();
     for (const tile of this.tiles.values()) {
       tile.controller.abort();
       if (tile.payload !== undefined) {
@@ -498,6 +529,7 @@ export class TileScheduler<DecodedT, PayloadT> {
         tile.decoded = decoded;
         tile.state = "decoded";
         tile.lastUsed = this.frame;
+        this.pendingUploads.add(tile);
         // Drawing it takes a frame: the layer's `prerender` uploads it.
         this.options.onNeedsRepaint?.();
       })
