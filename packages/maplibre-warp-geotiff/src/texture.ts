@@ -229,46 +229,68 @@ function setPixelStoreForRasterUpload(gl: WebGL2RenderingContext): void {
 }
 
 /**
- * Upload a 2D texture. Bracket-only, and leaves the texture bound on the
- * current unit; see {@link setPixelStoreForRasterUpload}.
+ * Create a texture and run `upload` with it bound to `target` on the current
+ * unit and the pixel store set for raw data. Bracket-only, and leaves the
+ * texture bound; see {@link setPixelStoreForRasterUpload}.
+ */
+function withTextureUpload(
+  gl: WebGL2RenderingContext,
+  target: GLenum,
+  upload: () => void,
+): WebGLTexture {
+  const texture = gl.createTexture();
+  if (!texture) {
+    throw new Error("Failed to create WebGL texture");
+  }
+  setPixelStoreForRasterUpload(gl);
+  gl.bindTexture(target, texture);
+  upload();
+  return texture;
+}
+
+/** Filtering and clamping for a texture bound to `target`. */
+function setSamplerParameters(
+  gl: WebGL2RenderingContext,
+  target: GLenum,
+  filter: GLenum,
+): void {
+  gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  if (target === gl.TEXTURE_2D_ARRAY) {
+    gl.texParameteri(target, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  }
+}
+
+/**
+ * Upload a 2D texture. Bracket-only, like {@link withTextureUpload}.
  */
 export function createTexture2D(
   gl: WebGL2RenderingContext,
   options: CreateTextureOptions,
 ): WebGLTexture {
   const { width, height, data, format, linear } = options;
-  const texture = gl.createTexture();
-  if (!texture) {
-    throw new Error("Failed to create WebGL texture");
-  }
-
-  setPixelStoreForRasterUpload(gl);
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-
-  gl.texImage2D(
-    gl.TEXTURE_2D,
-    0,
-    format.internalFormat,
-    width,
-    height,
-    0,
-    format.format,
-    format.type,
-    data,
-  );
-
-  const filter = linear && format.filterable ? gl.LINEAR : gl.NEAREST;
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-  return texture;
+  return withTextureUpload(gl, gl.TEXTURE_2D, () => {
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      format.internalFormat,
+      width,
+      height,
+      0,
+      format.format,
+      format.type,
+      data,
+    );
+    const filter = linear && format.filterable ? gl.LINEAR : gl.NEAREST;
+    setSamplerParameters(gl, gl.TEXTURE_2D, filter);
+  });
 }
 
 /**
  * Upload a colormap sprite as a single-layer `TEXTURE_2D_ARRAY`. Bracket-only,
- * like {@link createTexture2D}.
+ * like {@link withTextureUpload}.
  *
  * An array texture (rather than a plain 2D one) so that multiple colormaps can
  * be packed into one texture later and selected by layer index — the shape the
@@ -278,36 +300,23 @@ export function createColormapTexture(
   gl: WebGL2RenderingContext,
   image: ImageData,
 ): WebGLTexture {
-  const texture = gl.createTexture();
-  if (!texture) {
-    throw new Error("Failed to create WebGL texture");
-  }
-
-  setPixelStoreForRasterUpload(gl);
-  gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
-
-  gl.texImage3D(
-    gl.TEXTURE_2D_ARRAY,
-    0,
-    gl.RGBA8,
-    image.width,
-    image.height,
-    1,
-    0,
-    gl.RGBA,
-    gl.UNSIGNED_BYTE,
-    new Uint8Array(
-      image.data.buffer,
-      image.data.byteOffset,
-      image.data.byteLength,
-    ),
-  );
-
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
-
-  return texture;
+  return withTextureUpload(gl, gl.TEXTURE_2D_ARRAY, () => {
+    gl.texImage3D(
+      gl.TEXTURE_2D_ARRAY,
+      0,
+      gl.RGBA8,
+      image.width,
+      image.height,
+      1,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      new Uint8Array(
+        image.data.buffer,
+        image.data.byteOffset,
+        image.data.byteLength,
+      ),
+    );
+    setSamplerParameters(gl, gl.TEXTURE_2D_ARRAY, gl.NEAREST);
+  });
 }

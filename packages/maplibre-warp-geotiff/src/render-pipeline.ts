@@ -19,7 +19,10 @@ import type {
   RasterTypedArray,
 } from "@developmentseed/geotiff";
 import { parseColormap } from "@developmentseed/geotiff";
-import type { RenderPipeline } from "@yutannihilation/maplibre-warp-raster";
+import type {
+  RasterModuleInstance,
+  RenderPipeline,
+} from "@yutannihilation/maplibre-warp-raster";
 import type {
   BandColorImage,
   BandColors,
@@ -429,6 +432,59 @@ export function inferRenderPipeline(
   return createUnormRenderer(geotiff, gl);
 }
 
+/** The mask module for a tile that has a mask texture, else nothing. */
+function maskModule(
+  gl: WebGL2RenderingContext,
+  textures: GeoTiffTileTextures,
+): RasterModuleInstance[] {
+  return textures.mask
+    ? [
+        {
+          module: MaskTexture,
+          props: { mask: { texture: textures.mask, target: gl.TEXTURE_2D } },
+        },
+      ]
+    : [];
+}
+
+/**
+ * The pipelines a renderer has handed out and not yet destroyed, by their
+ * tile's textures, so a re-style can rebuild the module chain of tiles
+ * already built. Each rebuild is in place, since the array is the one the
+ * tile's payload holds; the program cache compiles any new chain on demand.
+ */
+interface LivePipelines {
+  buildPipeline: GeoTiffRenderer["buildPipeline"];
+  destroyTileTextures: GeoTiffRenderer["destroyTileTextures"];
+  /** Rebuild every live pipeline from the current style. */
+  rebuild(): void;
+  /** Forget every pipeline, for the renderer's `destroy`. */
+  clear(): void;
+}
+
+function livePipelines(
+  modulesFor: (textures: GeoTiffTileTextures) => RenderPipeline,
+): LivePipelines {
+  const live = new Map<GeoTiffTileTextures, RenderPipeline>();
+  return {
+    buildPipeline: (textures) => {
+      const pipeline = modulesFor(textures);
+      live.set(textures, pipeline);
+      return pipeline;
+    },
+    destroyTileTextures: (gl, textures) => {
+      live.delete(textures);
+      destroyTileTextures(gl, textures);
+    },
+    rebuild: () => {
+      for (const [textures, pipeline] of live) {
+        pipeline.splice(0, pipeline.length, ...modulesFor(textures));
+      }
+    },
+    clear: () => live.clear(),
+  };
+}
+
 function createUnormRenderer(
   geotiff: GeoTIFF,
   gl: WebGL2RenderingContext,
@@ -491,12 +547,7 @@ function createUnormRenderer(
       });
     }
 
-    if (textures.mask) {
-      pipeline.push({
-        module: MaskTexture,
-        props: { mask: { texture: textures.mask, target: gl.TEXTURE_2D } },
-      });
-    }
+    pipeline.push(...maskModule(gl, textures));
 
     const colorModule = photometricModule({
       samplesPerPixel,
@@ -850,22 +901,13 @@ function createContourRenderer(
   let style: ContourStyle | undefined;
   let pending: ResolvedContourOptions | null = resolved;
 
-  const currentStyle = (): ContourStyle => {
+  const modulesFor = (textures: GeoTiffTileTextures): RenderPipeline => {
     if (!style) {
       throw new Error(
         "buildPipeline needs the contour colour textures: call prepare(gl) first",
       );
     }
-    return style;
-  };
-
-  // Every pipeline handed out and not yet destroyed, by its tile's textures,
-  // so a re-style can rebuild the module chain of tiles already built. The
-  // program cache compiles any new chain on demand.
-  const live = new Map<GeoTiffTileTextures, RenderPipeline>();
-
-  const modulesFor = (textures: GeoTiffTileTextures): RenderPipeline => {
-    const pipeline: RenderPipeline = [
+    return [
       {
         module: seed,
         props: {
@@ -878,26 +920,13 @@ function createContourRenderer(
           halo: textures.halo,
         },
       },
+      ...maskModule(gl, textures),
+      style.fill,
+      ...(style.lines ? [{ module: ContourLine, props: style.lines }] : []),
     ];
-    if (textures.mask) {
-      pipeline.push({
-        module: MaskTexture,
-        props: { mask: { texture: textures.mask, target: gl.TEXTURE_2D } },
-      });
-    }
-    const style = currentStyle();
-    pipeline.push(style.fill);
-    if (style.lines) {
-      pipeline.push({ module: ContourLine, props: style.lines });
-    }
-    return pipeline;
   };
 
-  const buildPipeline = (textures: GeoTiffTileTextures): RenderPipeline => {
-    const pipeline = modulesFor(textures);
-    live.set(textures, pipeline);
-    return pipeline;
-  };
+  const pipelines = livePipelines(modulesFor);
 
   const updateContour = (next: ResolvedContourOptions): void => {
     // The seed's band index is what selects the texture channel; a change
@@ -926,10 +955,7 @@ function createContourRenderer(
       destroyStyle(glContext, style);
     }
     style = nextStyle;
-    // In place, since each array is the one its tile's payload holds.
-    for (const [textures, pipeline] of live) {
-      pipeline.splice(0, pipeline.length, ...modulesFor(textures));
-    }
+    pipelines.rebuild();
   };
 
   // Contours interpolate `value` manually, so each tile carries a halo of
@@ -946,15 +972,12 @@ function createContourRenderer(
         textureFormat,
         linearFilter: false,
       }),
-    buildPipeline,
-    destroyTileTextures: (glContext, textures) => {
-      live.delete(textures);
-      destroyTileTextures(glContext, textures);
-    },
+    buildPipeline: pipelines.buildPipeline,
+    destroyTileTextures: pipelines.destroyTileTextures,
     prepare,
     destroy: (glContext) => {
       haloCache.clear();
-      live.clear();
+      pipelines.clear();
       if (style) {
         destroyStyle(glContext, style);
         style = undefined;
