@@ -216,10 +216,12 @@ records a re-style for the next `prerender`.
    `SamplesPerPixel`, `PhotometricInterpretation`, `ColorMap` and nodata from
    the tags and returns a `GeoTiffRenderer`: a GL-free tile loader, a
    bracket-only texture uploader, and a function that builds the shader
-   module chain for a tile. A palette image's `ColorMap` is parsed here, so
-   a missing or malformed one fails while the source opens; the colormap
-   texture itself is created by the renderer's `prepare` in the first
-   `prerender` (section 2.5).
+   module chain for a tile. A `RangeError` here says the options do not fit
+   the file, which no retry can change, so it is rethrown as an
+   `UnrecoverableSourceError` and the source is not retried. A palette
+   image's `ColorMap` is parsed here too, so a missing or malformed one fails
+   while the source opens; the colormap texture itself is created by the
+   renderer's `prepare` in the first `prerender` (section 2.5).
 
 The `RasterSource` returned to the base class is three things: the descriptor,
 the dataset's WGS84 bounds (for culling), and a `loadTile(index, { signal })`
