@@ -194,10 +194,8 @@ origin, so shared vertices stay bit-identical and tile edges cannot crack.
 The layer also relies on MapLibre's own bracketing of the `prerender` and
 `render` hooks instead of saving and restoring GL state: tiles are fetched,
 decoded and meshed asynchronously between frames, but every GPU upload waits
-for `prerender`, capped at `maxUploadBytesPerFrame` per frame. It uses plain
-`gl.uniform*` rather than uniform blocks
-([maplibre-gl-js#8413](https://github.com/maplibre/maplibre-gl-js/issues/8413)),
-and outputs premultiplied alpha. The details, and the reasoning behind each
+for `prerender`, capped at `maxUploadBytesPerFrame` per frame. It outputs
+premultiplied alpha. The details, and the reasoning behind each
 choice, are in [`docs/internals.md`](docs/internals.md).
 
 ## Current limitations

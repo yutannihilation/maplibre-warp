@@ -101,10 +101,13 @@ everything it touched, because MapLibre's cached view is not invalidated
 there. This package therefore does none. Fetching, decoding and meshing run
 asynchronously between frames but hand back CPU-side data only; every upload
 waits for `prerender` (section 2.5). No `gl.getParameter` call remains in
-either package. The one thing done outside the hooks is deletion
-(`gl.delete*`) on eviction and removal, as MapLibre does for its own tiles:
-deleting an object cannot leave MapLibre's cache pointing at a binding it
-will rely on.
+either package. Deletion (`gl.delete*`) mostly happens inside the bracket
+too: eviction runs from `scheduler.update()` in `render`, and a contour
+re-style deletes its old textures in `prerender`. The exceptions are
+`onRemove`, and a retried `createSource` releasing the previous attempt's
+renderer. Deleting outside the bracket is safe, as it is for MapLibre's own
+tiles, because deleting an object cannot leave MapLibre's cache pointing at a
+binding it will rely on.
 
 One caveat: `drawCustom` has no `try`/`finally`, so if a hook throws,
 `setDirty()` is skipped and MapLibre's cached state stays stale for the rest
@@ -115,11 +118,6 @@ that fails to compile therefore fails the whole frame, not just the tile. In
 `prerender` both sources of failure are contained: a tile upload that throws
 fails that tile alone, through the scheduler's retry path, and a failure
 creating the layer-wide textures is caught and logged by `COGLayer.prerender`.
-
-One MapLibre-specific hazard: a custom layer that binds uniform buffer objects
-to binding points 0–2 corrupts every MapLibre layer drawn after it in the same
-frame ([maplibre-gl-js#8413](https://github.com/maplibre/maplibre-gl-js/issues/8413)).
-This package uses plain `gl.uniform*` calls only.
 
 ### Our implementation
 
@@ -187,10 +185,13 @@ records a re-style for the next `prerender`.
 
 `COGLayer.createSource` runs once per layer (and again on retry):
 
-1. **Fetch the header.** `fetchGeoTIFF` wraps `@developmentseed/geotiff`'s
-   `GeoTIFF.fromUrl`, which reads the IFDs over HTTP range requests. Requests
-   go through a `PerOriginSemaphore` capped at six, matching the browser's
-   HTTP/1.1 per-origin connection limit.
+1. **Fetch the header.** `fetchGeoTIFF` dispatches on the `geotiff` prop.
+   A URL goes to `@developmentseed/geotiff`'s `GeoTIFF.fromUrl`, which reads
+   the IFDs over HTTP range requests, through a `PerOriginSemaphore` capped
+   at six by default to match the browser's HTTP/1.1 per-origin connection
+   limit. An `ArrayBuffer` goes to `GeoTIFF.fromArrayBuffer`, and an
+   already-opened `GeoTIFF` is used as is. Neither of those makes HTTP
+   requests or uses the semaphore.
 2. **Resolve the CRS.** The GeoTIFF's CRS is either an EPSG code (resolved
    through `epsg.io` by default, cached) or WKT (parsed locally). proj4 builds
    two converters, source ↔ EPSG:4326 and source ↔ EPSG:3857. The 3857
@@ -200,9 +201,13 @@ records a re-style for the next `prerender`.
    (`geotiff-tileset.ts`) makes one `AffineTilesetLevel` per image: the
    overviews coarsest-first, then the full-resolution image as the finest
    level. Each level holds the image's affine geotransform, pixel dimensions
-   and tile size, and derives `metersPerPixel` (geometric mean of the pixel
-   edges times metres-per-CRS-unit) for LOD selection. Because each level is
-   an arbitrary affine, rotated and skewed geotransforms work unchanged. Note
+   and tile size, and derives `metersPerPixel` for LOD selection as
+   `sqrt(|a · e|)` times metres-per-CRS-unit, where `a` and `e` are the
+   affine's diagonal terms. Tile footprints, traversal and the mesh use the
+   full affine, so rotated and skewed geotransforms are placed and warped
+   correctly. LOD selection is not: the formula ignores the `b` and `d`
+   terms, so it misjudges pixel size for a rotated or skewed grid, and for a
+   90° rotation it is zero. Note
    that a COG pyramid is a stack of independent grids, not a quadtree; the
    traversal finds children by mapping a tile's CRS bounds into the next
    level's grid.
@@ -408,9 +413,13 @@ tile may be drawn with. The constructor leaves the array buffer bound and
 unbinds only the VAO, so the element-buffer binding, which is VAO state, is
 not captured by a later bind.
 
-Everything up to `GpuMesh` runs on the main thread between frames, in
-float64, once per tile. The mesh and the textures together form the
-`RasterTilePayload` the scheduler caches and the layer draws.
+Decoding runs in the `DecoderPool` workers and keeps the source's typed-array
+type. Everything after it up to `GpuMesh`, the reprojection and the Delatin
+refinement, runs on the main thread between frames, once per tile. The
+refinement computes positions in float64; what it hands on is float32 high
+and low positions and UVs, plus uint32 indices. The mesh and the textures
+together form the `RasterTilePayload` the scheduler caches and the layer
+draws.
 
 ### 3.3 The vertex shader
 
@@ -452,8 +461,12 @@ relative-to-centre, computed in `mercatorFrameUniforms`
 - `O` is split high/low exactly like the vertices and uploaded as
   `u_origin_high` / `u_origin_low`.
 
-In the shader both subtractions are exact by Sterbenz's lemma whenever the
-vertex is within a factor of two of the origin. At low zoom the screen spans
+In the shader the high-half subtraction is exact by Sterbenz's lemma
+whenever the vertex is within a factor of two of the origin. The low-half
+subtraction is not exact in general, since the residuals can differ in sign
+and magnitude. It does not need to be: each residual is below half a float32
+ulp of its high half, so rounding their difference costs only about 2⁻⁴⁹ of
+the `[0, 1]` world, far below a pixel at any zoom. At low zoom the screen spans
 more than that (at zoom 0 it spans the whole `[0, 1]` world), so far-off
 vertices do round, but there float32 is already sub-pixel and the rounding is
 invisible. At the zooms where precision matters, roughly zoom 12 and above,
@@ -481,10 +494,16 @@ where MapLibre switches to flat mercator and the relative scheme takes over.
 `buildFragmentSource` (`shader/sources.ts`) concatenates a chain of **shader
 modules** (`shader/module.ts`, `gpu-modules/`). A module contributes
 global-scope declarations (samplers, uniforms, helper functions) and a
-snippet for `main()` that operates on the in-scope `vec4 color` and `vec2 uv`.
-The first module seeds `color` from the tile texture; later ones discard
-nodata, apply the mask, convert photometric interpretations or look up a
-colormap. The end of `main()` is fixed:
+snippet for `main()` that operates on the in-scope `vec4 color` and `vec2 uv`,
+plus `float value` and `float valid` for modules that work on a scalar sample
+rather than a colour. In the imagery chains the first module seeds `color`
+from the tile texture; later ones discard nodata, apply the mask, convert
+photometric interpretations or look up a colormap. In the contour chains the
+seed, `ValueTexture`, interpolates the sample and sets `value` in data units
+and `valid`, which is zero if any of the four texels is NaN or the nodata
+sentinel. The fill module after it (`Isoband`, `ValueGradient` or
+`ClearColor`) writes `color` from those, and `ContourLine` composites lines
+over it. The end of `main()` is fixed:
 
 ```glsl
 fragColor = vec4(color.rgb * color.a * u_opacity, color.a * u_opacity);
