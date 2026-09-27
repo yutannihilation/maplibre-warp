@@ -200,10 +200,12 @@ export class COGLayer extends RasterCustomLayer {
    * The new colour textures are created in that frame's `prerender`. If that
    * fails the error is logged and the previous style stays.
    *
+   * `band` may change too: every band is on the GPU as a layer of the tile's
+   * texture array.
+   *
    * Refused with a `RangeError`: any option that fails the constructor's
-   * validation, a layer created without `contour` (its tiles hold imagery
-   * textures, not values), and changing `band`. Recreate the layer for
-   * those.
+   * validation, a `band` the file does not have, and a layer created without
+   * `contour` (recreate the layer to switch imagery to contours).
    */
   setContour(contour: ContourRenderOptions): void {
     if (!this.contour) {
