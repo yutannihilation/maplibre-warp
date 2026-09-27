@@ -25,17 +25,18 @@ describe("ValueTexture", () => {
       const module = ValueTexture[kind];
       expect(module.name).toContain(kind);
       expect(module.fsDecl).toContain(`${sampler} u_value_texture`);
-      expect(module.fsColor).toContain("texelFetch");
+      expect(module.fsDecl).toContain("texelFetch");
+      expect(module.fsColor).toContain("u_value_sample(u_value_band");
       expect(module.fsColor).toContain("value =");
     }
   });
 
   it("treats non-finite texels as missing, not only the sentinel", () => {
     for (const kind of ["float", "uint", "int"] as const) {
-      const body = ValueTexture[kind].fsColor!;
+      const decl = ValueTexture[kind].fsDecl!;
       // Every contributing texel is checked with isnan before it can reach
       // the bilinear mix, since NaN is a common nodata marker in float DEMs.
-      expect(body.match(/isnan\(v(00|10|01|11)\)/g)).toHaveLength(4);
+      expect(decl.match(/isnan\(v(00|10|01|11)\)/g)).toHaveLength(4);
     }
   });
 

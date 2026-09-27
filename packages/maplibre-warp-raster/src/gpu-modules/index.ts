@@ -227,7 +227,6 @@ export type {
   IsobandProps,
   PackedThresholds,
   ValueGradientProps,
-  ValueSamplerKind,
   ValueTextureProps,
 } from "./contour.js";
 export {
@@ -259,3 +258,4 @@ export {
   resolveGradientStops,
   validateThresholds,
 } from "./contour-bands.js";
+export type { ValueSamplerKind } from "./texture-sampling.js";
