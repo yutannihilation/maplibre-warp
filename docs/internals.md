@@ -177,8 +177,9 @@ Repaints are requested on events, never per frame: when a tile finishes
 decoding and needs its upload, when uploads remain after a frame hits its
 byte cap, or when a failed tile's retry falls due (all via the scheduler's
 `onNeedsRepaint`); when the source attaches; when a zoom animation ends; and
-when `setOpacity` or `COGLayer.setContour` changes a per-frame uniform or
-records a re-style for the next `prerender`.
+when `setOpacity`, `COGLayer.setBands`/`setRescale` or `COGLayer.setContour`
+changes a uniform, rebuilds the tiles' module chains or records a re-style
+for the next `prerender`.
 
 ## 2. Loading: from COG to texture
 
@@ -293,7 +294,7 @@ asynchronous and GL-free:
 - The result, a `GeoTiffTilePixels`, is the planes, the content size, the
   halo width (0 for imagery) and an optional content-sized validity mask
   from the GeoTIFF's mask IFD. Every band of the file is kept, whichever are
-  drawn.
+  drawn, so a later change of composite needs no reload.
 
 ### 2.4 Choosing the texture format
 
@@ -375,6 +376,15 @@ from. This is also why `COGLayer.setContour` takes effect on the following
 frame: `updateContour` is GL-free and only records the resolved options, and
 the next `prepare` creates the new colour textures, deletes the old ones, and
 rewrites the module chain of every live tile in place.
+
+`COGLayer.setBands` and `setRescale` need no `prepare`, because every band is
+already on the GPU and no texture changes. `updateImagery` resolves the new
+options against the tags, throwing a `RangeError` before touching any tile,
+and applies them at once. When the module chain keeps its shape, it writes
+the new channel map and stretch into the arrays that every tile's props
+share, which the next frame's `getUniforms` reads; a slider can drive it at
+input rate. Otherwise, when a stretch appears or disappears or the colour
+conversion changes, it rebuilds every live tile's chain in place.
 
 ## 3. Warping: from source pixels to the map
 
@@ -557,10 +567,11 @@ order seed → mask → stretch → colour. For an 8-bit RGB COG it is
 `BandTexture → LinearRescale`, one selected band adds `BlackIsZero` to draw
 it as grey, and a palette image is `BandTexture → Colormap`. Each module instance carries
 the props (a texture binding, a channel map, a nodata value) that
-`getUniforms` turns into uniform values at draw time. The contour renderer shares its fill and line module instances
-by reference across every tile's chain, which is what lets `prepare` re-style
-all tiles at once by rebuilding those chains in place; the program cache
-compiles any new chain on demand.
+`getUniforms` turns into uniform values at draw time. Both renderers
+share their style by reference across every tile's chain (the imagery
+channel map and stretch, the contour fill and lines), which is what lets a
+re-style reach all tiles at once, either in place or by rebuilding their
+chains; the program cache compiles any new chain on demand.
 
 ### 3.5 Programs and the draw loop
 

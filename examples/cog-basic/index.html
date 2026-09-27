@@ -35,13 +35,15 @@
         width: 100%;
         margin-bottom: 8px;
       }
-      #contour-controls {
+      #contour-controls,
+      #band-controls {
         margin: 0 0 8px;
         padding: 6px 8px 2px;
         border: 1px solid rgba(0, 0, 0, 0.15);
         border-radius: 4px;
       }
-      #contour-controls legend {
+      #contour-controls legend,
+      #band-controls legend {
         padding: 0 4px;
         font-weight: 600;
       }
@@ -112,6 +114,15 @@
       </select>
       <label for="opacity">Opacity <output for="opacity" id="opacity-value"></output></label>
       <input id="opacity" type="range" min="0" max="1" step="0.05" value="1" />
+      <fieldset id="band-controls" hidden>
+        <legend>Bands</legend>
+        <label for="preset">Composite</label>
+        <select id="preset"></select>
+        <div id="stretch-row">
+          <label for="stretch">Stretch max <output for="stretch" id="stretch-value"></output></label>
+          <input id="stretch" type="range" step="10" />
+        </div>
+      </fieldset>
       <fieldset id="contour-controls" hidden>
         <legend>Contours</legend>
         <label for="fill">Fill</label>
