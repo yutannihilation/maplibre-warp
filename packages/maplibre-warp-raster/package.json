@@ -31,9 +31,9 @@
     "@math.gl/culling": "^4.1.0"
   },
   "peerDependencies": {
-    "maplibre-gl": "^6.7.0"
+    "maplibre-gl": "^6.11.2"
   },
   "devDependencies": {
-    "maplibre-gl": "6.7.0"
+    "maplibre-gl": "6.11.2"
   }
 }

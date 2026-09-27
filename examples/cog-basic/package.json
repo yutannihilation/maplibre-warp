@@ -13,7 +13,7 @@
     "@yutannihilation/maplibre-warp-geotiff": "workspace:^",
     "@yutannihilation/maplibre-warp-raster": "workspace:^",
     "d3-scale-chromatic": "3.1.0",
-    "maplibre-gl": "6.7.0"
+    "maplibre-gl": "6.11.2"
   },
   "devDependencies": {
     "@types/d3-scale-chromatic": "3.1.0",
