@@ -35,6 +35,7 @@ import {
   MAX_WEB_MERCATOR_LAT,
   mercatorFromEPSG3857,
   RasterCustomLayer,
+  UnrecoverableSourceError,
 } from "@yutannihilation/maplibre-warp-raster";
 import type { CustomRenderMethodInput, Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
@@ -342,9 +343,18 @@ export class COGLayer extends RasterCustomLayer {
       Math.min(rawBounds[3], MAX_WEB_MERCATOR_LAT),
     ];
 
-    const renderer = inferRenderPipeline(geotiff, gl, {
-      contour: this.contour,
-    });
+    let renderer: GeoTiffRenderer;
+    try {
+      renderer = inferRenderPipeline(geotiff, gl, {
+        contour: this.contour,
+      });
+    } catch (error) {
+      // Every I/O is done by now: a RangeError here says the options do not
+      // fit the file's tags, which no retry can change.
+      throw error instanceof RangeError
+        ? new UnrecoverableSourceError(error)
+        : error;
+    }
     this.renderer = renderer;
 
     this.props.onGeoTIFFLoad?.(geotiff, {

@@ -30,6 +30,7 @@ export {
   mercatorFrameUniforms,
   RasterCustomLayer,
   translateMatrix,
+  UnrecoverableSourceError,
 } from "./raster-custom-layer.js";
 export type {
   ModuleBindings,
