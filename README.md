@@ -166,7 +166,7 @@ layer.getBands(); // [{ band, min, max, color }, …] for a legend
 bands: { colors: schemeBlues[5] }
 
 // Re-style in place — no reload, tiles on the GPU repaint with the new
-// options on the next frame. Everything but `band` can change, including
+// options on the next frame. Everything can change, including the band,
 // the fill mode and lines on or off; a new module chain is compiled on
 // demand.
 layer.setContour({
