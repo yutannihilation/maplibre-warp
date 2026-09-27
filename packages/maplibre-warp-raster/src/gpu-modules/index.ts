@@ -222,6 +222,8 @@ uniform float u_colormap_reversed;`,
   }),
 };
 
+export type { BandTextureProps } from "./band-texture.js";
+export { BandTexture } from "./band-texture.js";
 export type {
   ContourLineProps,
   IsobandProps,

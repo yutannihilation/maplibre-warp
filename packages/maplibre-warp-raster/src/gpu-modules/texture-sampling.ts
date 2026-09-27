@@ -1,6 +1,6 @@
 /**
- * GLSL shared by the seeds that read a raster texture by hand: sampler types
- * and the manual bilinear tap around `uv`.
+ * GLSL shared by the seeds that read a band array texture: sampler types and
+ * the manual bilinear tap around `uv`.
  *
  * Integer textures cannot be LINEAR-filtered and float textures need an
  * extension for it, so every seed interpolates by hand with `texelFetch`.
@@ -8,14 +8,17 @@
  * invalidates the pixel instead of bleeding into it.
  */
 
-/** Sampler kinds a value texture can be declared with. */
+/** Sampler kinds a band texture can be declared with. */
 export type ValueSamplerKind = "float" | "uint" | "int";
 
-/** GLSL sampler type per kind, for a 2D texture. */
-export const SAMPLER_TYPE: Record<ValueSamplerKind, string> = {
-  float: "sampler2D",
-  uint: "usampler2D",
-  int: "isampler2D",
+/**
+ * GLSL sampler type per kind, for a 2D array texture. Array samplers have no
+ * default precision in GLSL ES 3.00, so every seed declares one.
+ */
+export const ARRAY_SAMPLER_TYPE: Record<ValueSamplerKind, string> = {
+  float: "sampler2DArray",
+  uint: "usampler2DArray",
+  int: "isampler2DArray",
 };
 
 /**
@@ -36,18 +39,27 @@ export const BILINEAR_TAPS_GLSL = (
     ivec2 i11 = clamp(ivec2(p0) + 1, ivec2(0), maxTexel);`;
 
 /**
- * A GLSL function `${prefix}_sample(channel, i00, i11, f, out invalid)` that
- * reads one channel of `${prefix}_texture` at the taps from
- * {@link BILINEAR_TAPS_GLSL} and mixes them. `invalid` is set for a NaN tap
- * or one equal to `${prefix}_nodata` when `${prefix}_has_nodata` is 1.
+ * A GLSL function `${prefix}_sample(layer, i00, i11, f, out invalid)` that
+ * reads one layer of `${prefix}_texture` at the taps from
+ * {@link BILINEAR_TAPS_GLSL} and mixes them, or — when the `nearest` GLSL
+ * expression holds — fetches the nearest texel alone, so a class next to
+ * nodata keeps its edge. `invalid` is set for a NaN tap or one equal to
+ * `${prefix}_nodata` when `${prefix}_has_nodata` is 1.
  */
 export const BILINEAR_SAMPLE_GLSL = (
   prefix: string,
-): string => `float ${prefix}_sample(int channel, ivec2 i00, ivec2 i11, vec2 f, out bool invalid) {
-  float v00 = float(texelFetch(${prefix}_texture, ivec2(i00.x, i00.y), 0)[channel]);
-  float v10 = float(texelFetch(${prefix}_texture, ivec2(i11.x, i00.y), 0)[channel]);
-  float v01 = float(texelFetch(${prefix}_texture, ivec2(i00.x, i11.y), 0)[channel]);
-  float v11 = float(texelFetch(${prefix}_texture, ivec2(i11.x, i11.y), 0)[channel]);
+  nearest: string,
+): string => `float ${prefix}_sample(int layer, ivec2 i00, ivec2 i11, vec2 f, out bool invalid) {
+  if (${nearest}) {
+    ivec2 n = ivec2(f.x < 0.5 ? i00.x : i11.x, f.y < 0.5 ? i00.y : i11.y);
+    float v = float(texelFetch(${prefix}_texture, ivec3(n, layer), 0).r);
+    invalid = isnan(v) || (${prefix}_has_nodata == 1 && v == ${prefix}_nodata);
+    return v;
+  }
+  float v00 = float(texelFetch(${prefix}_texture, ivec3(i00.x, i00.y, layer), 0).r);
+  float v10 = float(texelFetch(${prefix}_texture, ivec3(i11.x, i00.y, layer), 0).r);
+  float v01 = float(texelFetch(${prefix}_texture, ivec3(i00.x, i11.y, layer), 0).r);
+  float v11 = float(texelFetch(${prefix}_texture, ivec3(i11.x, i11.y, layer), 0).r);
   // NaN is a common nodata marker in float rasters and never equals a
   // sentinel, so test it explicitly; a NaN texel would otherwise poison the
   // mix and every comparison downstream.

@@ -4,7 +4,8 @@ export {
   geoTiffToDescriptor,
   imageForLevel,
 } from "./geotiff-tileset.js";
-export { addAlphaChannel, fetchGeoTIFF, toGlView } from "./geotiff-utils.js";
+export { bandPlanes, fetchGeoTIFF, toGlView } from "./geotiff-utils.js";
+export type { Stitchable } from "./halo.js";
 export type {
   ContourBandOptions,
   ContourBandWithColor,
@@ -24,6 +25,7 @@ export {
   validateContourOptions,
 } from "./render-pipeline.js";
 export type {
+  CreateTextureArrayOptions,
   CreateTextureOptions,
   GLTextureFormat,
   SamplerKind,
@@ -31,5 +33,6 @@ export type {
 export {
   createColormapTexture,
   createTexture2D,
+  createTextureArray,
   inferTextureFormat,
 } from "./texture.js";

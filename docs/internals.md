@@ -100,11 +100,12 @@ The flip side is that GL work *outside* the bracket would have to restore
 everything it touched, because MapLibre's cached view is not invalidated
 there. This package therefore does none. Fetching, decoding and meshing run
 asynchronously between frames but hand back CPU-side data only; every upload
-waits for `prerender` (section 2.5). No `gl.getParameter` call remains in
-either package. Deletion (`gl.delete*`) mostly happens inside the bracket
-too: eviction runs from `scheduler.update()` in `render`, and a contour
-re-style deletes its old textures in `prerender`. The exceptions are
-`onRemove`, and a retried `createSource` releasing the previous attempt's
+waits for `prerender` (section 2.5). No GL state is ever read back; the one
+`gl.getParameter` call left reads the constant `MAX_ARRAY_TEXTURE_LAYERS`
+limit, once per context, and caches it. Deletion (`gl.delete*`) mostly happens
+inside the bracket too: eviction runs from `scheduler.update()` in `render`,
+and a contour re-style deletes its old textures in `prerender`. The exceptions
+are `onRemove`, and a retried `createSource` releasing the previous attempt's
 renderer. Deleting outside the bracket is safe, as it is for MapLibre's own
 tiles, because deleting an object cannot leave MapLibre's cache pointing at a
 binding it will rely on.
@@ -260,43 +261,61 @@ nor eviction touches it.
 `GeoTiffRenderer.loadTilePixels` → `fetchTilePixels` (`render-pipeline.ts`),
 asynchronous and GL-free:
 
-- `image.fetchTile(x, y, { boundless: false, pool, signal })` fetches the
-  tile's byte range and decodes it in `@developmentseed/geotiff`'s worker
-  `DecoderPool`. `boundless: false` means edge tiles come back clipped to the
-  image, so the decoded width and height can be smaller than the nominal tile
-  size; everything downstream uses the decoded size.
-- The result, a `GeoTiffTilePixels`, is a pixel-interleaved typed array
-  (`Uint8Array`, `Uint16Array`, `Float32Array`, …) plus an optional validity
-  mask from the GeoTIFF's mask IFD. Band-separate layouts are rejected.
-- Three-sample data is padded to four with an opaque alpha
-  (`addAlphaChannel`), because WebGL2 has no three-channel 8-bit format worth
-  sampling from.
-- In contour mode the tile's eight neighbours are fetched too, through a
-  shared `DecodedTileCache`, and their edge texels are stitched around it as
-  a one-texel halo (`halo.ts`). Imagery does not do this.
+- Imagery requests the tile alone, with
+  `image.fetchTile(x, y, { boundless: false, pool, signal })`. Contours
+  request the tile and its in-image neighbours, up to eight, through the
+  layer's `DecodedTileCache` (`tile-cache.ts`), an LRU of decoded tiles;
+  those not cached go out in one `fetchTiles` call, so the library can
+  coalesce their byte ranges. Either way, tiles are decoded in
+  `@developmentseed/geotiff`'s worker `DecoderPool`. `boundless: false`
+  means edge tiles come back clipped to the image, so the decoded width and
+  height can be smaller than the nominal tile size; everything downstream
+  uses the decoded size.
+- Each decoded tile becomes band planes, one typed array (`Uint8Array`,
+  `Uint16Array`, `Float32Array`, …) per band (`planarTile`). A
+  pixel-interleaved tile is de-interleaved in place the first time it is
+  seen, so a cached tile that neighbours several contour loads is split
+  once and the cache holds one copy. A band-separate tile
+  (`PlanarConfiguration = 2`) is used as it is.
+- For contours, the neighbours' edge texels are stitched around each plane
+  as a one-texel halo (`halo.ts`). The contour seed interpolates by hand
+  (section 3.4), and without the halo the outer half texel would clamp to
+  the tile's own edge and break every isoline into a step at the seam. A
+  neighbour that fails to load is left out, which clamps that seam the way
+  the image edge is clamped; only the tile's own failure fails the load.
+  Imagery goes without a halo: the same half-texel clamp is hard to see in
+  a picture, as it was with hardware filtering, and a halo would cost up to
+  eight extra fetches and decodes per tile.
+- The result, a `GeoTiffTilePixels`, is the planes, the content size, the
+  halo width (0 for imagery) and an optional content-sized validity mask
+  from the GeoTIFF's mask IFD. Every band of the file is kept, whichever are
+  drawn.
 
 ### 2.4 Choosing the texture format
 
 `inferTextureFormat` (`texture.ts`) maps `(channels, scalar kind, bit width)`
 to a WebGL2 `(internalFormat, format, type)` triple and records what that
-implies for the shader:
+implies for the shader. Tiles always ask for one channel, because every band
+becomes its own layer of an array texture (section 2.5):
 
-| Sample layout | Internal format | Sampler | Filterable | Sampled as |
-| --- | --- | --- | --- | --- |
-| 1/2/4 × uint8 | `R8` / `RG8` / `RGBA8` | `sampler2D` | yes | normalised `[0, 1]` |
-| 1/2/4 × uint16 | `R16UI` / `RG16UI` / `RGBA16UI` | `usampler2D` | no | raw integers |
-| 1 × uint32 | `R32UI` | `usampler2D` | no | raw integers² |
-| 1 × int8/16/32 | `R8I` / `R16I` / `R32I` | `isampler2D` | no | raw integers |
-| 1/2/4 × float32 | `R32F` / `RG32F` / `RGBA32F` | `sampler2D` | no¹ | raw floats |
+| Sample type | Internal format | Array sampler | Sampled as |
+| --- | --- | --- | --- |
+| uint8 | `R8` | `sampler2DArray` | normalised `[0, 1]` |
+| uint16 / uint32 | `R16UI` / `R32UI` | `usampler2DArray` | raw integers¹ |
+| int8 / int16 / int32 | `R8I` / `R16I` / `R32I` | `isampler2DArray` | raw integers |
+| float32 | `R32F` | `sampler2DArray` | raw floats |
 
-¹ Linear filtering of float textures needs `OES_texture_float_linear`; the
-table reports it as unavailable and the upload falls back to `NEAREST`.
+¹ The shader converts every sample to `float`, which is exact up to 2²⁴.
 
-² The shader converts samples to `float`, which is exact up to 2²⁴.
-
-The imagery path currently accepts only 8-bit unsigned samples and throws for
-the rest. The contour path accepts every row of the table, because it reads
-values with an exact-typed sampler and interpolates in the shader.
+`inferTextureFormat` also knows two- and four-channel formats, for other
+textures: the contour colour lookups are `RGBA8`. Integer formats cannot be
+`LINEAR`-filtered and float32 needs `OES_texture_float_linear`, so rather than
+depend on the hardware for some types and not others, the seeds read texels
+with `texelFetch` and interpolate themselves. The contour path accepts every
+row; imagery is still limited to 8-bit unsigned samples. A normalised texture
+samples as `[0, 1]` and every other one as raw values, so each renderer
+carries `denorm`, the type's maximum for `R8` and 1 otherwise, to express
+nodata and GDAL scale/offset in sampled units.
 
 ### 2.5 Uploading, in `prerender`
 
@@ -321,19 +340,24 @@ inside the loader so that the payload's `destroy` captures only the GPU
 handles; nested in the loader it would share its closure context and keep the
 decoded pixels and mesh arrays alive for as long as the tile stayed cached.
 
-`createTexture2D` (`texture.ts`) is one `texImage2D` with tightly packed rows,
-no Y flip and no alpha premultiplication, because raster samples are data and
-must reach the texture byte-for-byte. Filtering is `LINEAR` only for 8-bit
-continuous imagery. Palette indices and masks are `NEAREST` by choice, and
-every integer and float32 format is `NEAREST` because the format table marks
-them non-filterable, so `createTexture2D` downgrades the request silently.
-Wrap is `CLAMP_TO_EDGE`. Because it runs inside MapLibre's bracket it simply
-sets the three `UNPACK_*` pixel-store parameters and leaves the texture bound
-on the current unit; nothing is read back or restored.
+`createTextureArray` (`texture.ts`) allocates the tile's `TEXTURE_2D_ARRAY`
+with one `texStorage3D`, one single-channel layer per band at the
+halo-padded size, and fills each layer with a `texSubImage3D` of that band's
+plane. A tile therefore costs `width × height × bands × bytes per sample` on
+the GPU whether one band is drawn or four, and the per-frame byte cap counts
+all of it: an 8-band uint16 tile of 512 × 512 is about 4 MiB. Rows are
+tightly packed, with no Y flip and no alpha premultiplication, because raster
+samples are data and must reach the texture byte-for-byte. Filtering is
+`NEAREST`, since the seeds interpolate themselves, and wrap is
+`CLAMP_TO_EDGE`. A file with more bands than the context's
+`MAX_ARRAY_TEXTURE_LAYERS` (at least 256 in WebGL2) makes the upload throw.
+Because the upload functions run inside MapLibre's bracket they simply set
+the three `UNPACK_*` pixel-store parameters and leave the texture bound on
+the current unit; nothing is read back or restored.
 
-The mask, when present, becomes a second `R8` texture at the unpadded tile
-size with `NEAREST` filtering, so its edges never interpolate into a
-half-transparent fringe.
+The mask, when present, becomes a separate `R8` `TEXTURE_2D`
+(`createTexture2D`) at the unpadded tile size with `NEAREST` filtering, so
+its edges never interpolate into a half-transparent fringe.
 
 Layer-wide textures go through `prerender` too. `COGLayer.prerender` calls
 `GeoTiffRenderer.prepare(gl)` before the tile uploads, so the pipelines built
@@ -501,12 +525,17 @@ modules** (`shader/module.ts`, `gpu-modules/`). A module contributes
 global-scope declarations (samplers, uniforms, helper functions) and a
 snippet for `main()` that operates on the in-scope `vec4 color` and `vec2 uv`,
 plus `float value` and `float valid` for modules that work on a scalar sample
-rather than a colour. In the imagery chains the first module seeds `color`
-from the tile texture; later ones discard nodata, apply the mask, convert
-photometric interpretations or look up a colormap. In the contour chains the
-seed, `ValueTexture`, interpolates the sample and sets `value` in data units
-and `valid`, which is zero if any of the four texels is NaN or the nodata
-sentinel. The fill module after it (`Isoband`, `ValueGradient` or
+rather than a colour. In the imagery chains the seed, `BandTexture`, reads up
+to four layers of the band array, as the channel map `[r, g, b, a]` names
+them, and composes `color` in sampled units (section 2.4), bringing an alpha
+band to `[0, 1]`. It discards the pixel if any colour band is NaN or the
+nodata sentinel. Later modules apply the mask, convert photometric
+interpretations or look up a colormap. In the contour chains the seed,
+`ValueTexture`, interpolates one layer and sets `value` in data units and
+`valid`, which is zero if any of the four texels is NaN or the nodata
+sentinel. Both seeds interpolate by hand from four `texelFetch` taps
+(`texture-sampling.ts`); a palette index takes the nearest tap instead,
+because a value between two classes is a third, unrelated class. The fill module after it (`Isoband`, `ValueGradient` or
 `ClearColor`) writes `color` from those, and `ContourLine` composites lines
 over it. The end of `main()` is fixed:
 
@@ -516,12 +545,12 @@ fragColor = vec4(color.rgb * color.a * u_opacity, color.a * u_opacity);
 
 which is the premultiplied form MapLibre's blend function expects.
 
-The chain for a tile is decided by `GeoTiffRenderer.buildPipeline`. For an
-8-bit RGB COG with nodata it is `CreateTexture → FilterNoDataVal`; for a
-palette image `CreateTexture → Colormap`; for a single-band grayscale
-`CreateTexture → BlackIsZero`. Each module instance carries the props (a
-texture binding, a nodata value) that `getUniforms` turns into uniform values
-at draw time. The contour renderer shares its fill and line module instances
+The chain for a tile is decided by `GeoTiffRenderer.buildPipeline`, in the
+order seed → mask → colour. For an 8-bit RGB COG it is `BandTexture` alone; a
+mask adds `MaskTexture`. A single-band grayscale image adds `BlackIsZero`,
+and a palette image is `BandTexture → Colormap`. Each module instance carries
+the props (a texture binding, a channel map, a nodata value) that
+`getUniforms` turns into uniform values at draw time. The contour renderer shares its fill and line module instances
 by reference across every tile's chain, which is what lets `prepare` re-style
 all tiles at once by rebuilding those chains in place; the program cache
 compiles any new chain on demand.

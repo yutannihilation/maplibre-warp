@@ -3,10 +3,11 @@
  *
  * Decision logic ported from @developmentseed/deck.gl-raster (MIT, Development
  * Seed): `packages/deck.gl-geotiff/src/geotiff/render-pipeline.ts`. The
- * differences are that textures are raw WebGL2 objects rather than luma.gl
- * `Texture`s, and that the supported set is narrowed to what milestone 1
- * claims — 8-bit unsigned samples — with an explicit error for the rest rather
- * than a silent wrong-looking render.
+ * differences: textures are raw WebGL2 objects rather than luma.gl `Texture`s,
+ * and every band of a tile is uploaded as one layer of a `TEXTURE_2D_ARRAY`,
+ * read with an exactly typed sampler. Imagery is narrowed to 8-bit unsigned
+ * samples so far, with an explicit error for the rest rather than a silent
+ * wrong-looking render.
  */
 
 import { Photometric, SampleFormat } from "@cogeotiff/core";
@@ -14,9 +15,8 @@ import type {
   DecoderPool,
   GeoTIFF,
   Overview,
-  RasterArray,
-  RasterArrayPixelInterleaved,
   RasterTypedArray,
+  Tile,
 } from "@developmentseed/geotiff";
 import { parseColormap } from "@developmentseed/geotiff";
 import type {
@@ -33,6 +33,7 @@ import type {
   ValueGradientProps,
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 import {
+  BandTexture,
   BlackIsZero,
   bandColorImage,
   bandsFromThresholds,
@@ -41,9 +42,7 @@ import {
   CMYKToRGB,
   Colormap,
   ContourLine,
-  CreateTexture,
   colorToVec4,
-  FilterNoDataVal,
   gradientColorImage,
   Isoband,
   MaskTexture,
@@ -55,16 +54,19 @@ import {
   WhiteIsZero,
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 
-import { addAlphaChannel, toGlView } from "./geotiff-utils.js";
+import { bandPlanes, toGlView } from "./geotiff-utils.js";
+import type { Stitchable } from "./halo.js";
 import {
   HALO,
   neighbourCoordinates,
   neighbourIndex,
   stitchHalo,
 } from "./halo.js";
+import type { GLTextureFormat } from "./texture.js";
 import {
   createColormapTexture,
   createTexture2D,
+  createTextureArray,
   inferTextureFormat,
 } from "./texture.js";
 import { DecodedTileCache } from "./tile-cache.js";
@@ -81,6 +83,7 @@ export interface GeoTiffTileTextures {
    * padded.
    */
   halo: number;
+  /** A `TEXTURE_2D_ARRAY`, one single-channel layer per band of the file. */
   texture: WebGLTexture;
   mask?: WebGLTexture;
   /** GPU bytes held by these textures. */
@@ -94,8 +97,8 @@ export interface GeoTiffTileTextures {
  * {@link GeoTiffRenderer.uploadTileTextures}.
  */
 export interface GeoTiffTilePixels {
-  /** `(width + 2·halo) × (height + 2·halo)` texels, `samplesPerPixel` each. */
-  data: RasterTypedArray;
+  /** One `(width + 2·halo) × (height + 2·halo)` plane per band. */
+  planes: RasterTypedArray[];
   /** Content size in texels, excluding the halo. */
   width: number;
   height: number;
@@ -418,18 +421,37 @@ export function inferRenderPipeline(
   }
   if (sampleFormat[0] !== SampleFormat.Uint) {
     throw new Error(
-      `Only unsigned-integer samples are supported so far; found SampleFormat ${sampleFormat}. ` +
-        "Signed and floating-point rasters need the integer-sampler pipeline (milestone 2).",
+      `Only unsigned-integer samples are supported so far; found SampleFormat ${sampleFormat}.`,
     );
   }
   if (bitsPerSample[0] !== 8) {
     throw new Error(
-      `Only 8-bit samples are supported so far; found BitsPerSample ${bitsPerSample[0]}. ` +
-        "16- and 32-bit rasters need the integer-sampler pipeline (milestone 2).",
+      `Only 8-bit samples are supported so far; found BitsPerSample ${bitsPerSample[0]}.`,
     );
   }
+  return createImageryRenderer(geotiff, gl);
+}
 
-  return createUnormRenderer(geotiff, gl);
+/**
+ * The texture format every band is uploaded in — single channel, since each
+ * band is its own layer of the tile's texture array — and the unit
+ * conversions that follow from it. A normalised texture samples as [0, 1];
+ * every other format returns raw texel values. `denorm` takes a sampled
+ * value back to raw units, and `nodataSampled` is the sentinel in sampled
+ * units.
+ */
+function bandSampling(
+  geotiff: GeoTIFF,
+  gl: WebGL2RenderingContext,
+): { format: GLTextureFormat; denorm: number; nodataSampled: number | null } {
+  const { bitsPerSample, sampleFormat, nodata } = geotiff.cachedTags;
+  const format = inferTextureFormat(gl, 1, bitsPerSample, sampleFormat!);
+  const denorm = format.normalized ? 2 ** bitsPerSample[0]! - 1 : 1;
+  return {
+    format,
+    denorm,
+    nodataSampled: nodata === null ? null : nodata / denorm,
+  };
 }
 
 /** The mask module for a tile that has a mask texture, else nothing. */
@@ -485,34 +507,23 @@ function livePipelines(
   };
 }
 
-function createUnormRenderer(
+/**
+ * Imagery renderer: `BandTexture` seed → mask → colour, for 8-bit unsigned
+ * samples. Three bands are drawn as RGB and four as RGBA; one band (or the
+ * first of two) goes through the photometric interpretation's conversion.
+ */
+function createImageryRenderer(
   geotiff: GeoTIFF,
   gl: WebGL2RenderingContext,
 ): GeoTiffRenderer {
-  const {
-    bitsPerSample,
-    colorMap,
-    photometric,
-    sampleFormat,
-    samplesPerPixel,
-    nodata,
-  } = geotiff.cachedTags;
+  const { colorMap, photometric, samplesPerPixel } = geotiff.cachedTags;
+  const { format: textureFormat, nodataSampled } = bandSampling(geotiff, gl);
+  const seed = BandTexture[textureFormat.sampler];
+  const channelMap = imageryChannelMap(samplesPerPixel);
 
-  // WebGL2 has no usable 3-channel 8-bit sampleable format, so RGB is padded
-  // to RGBA on the CPU before upload.
-  const uploadedSamples = samplesPerPixel === 3 ? 4 : samplesPerPixel;
-  const textureFormat = inferTextureFormat(
-    gl,
-    uploadedSamples,
-    bitsPerSample,
-    sampleFormat!,
-  );
-
-  const isPalette = photometric === Photometric.Palette;
   // Palette indices cannot be interpolated — a value halfway between two
   // classes is a third, unrelated class.
-  const linearFilter = !isPalette;
-
+  const isPalette = photometric === Photometric.Palette;
   // Parsed now, so a missing or malformed ColorMap fails while the source is
   // opening; the texture itself waits for `prepare`, inside MapLibre's GL
   // bracket, which consumes this.
@@ -528,45 +539,33 @@ function createUnormRenderer(
   let colormapTexture: WebGLTexture | undefined;
 
   const buildPipeline = (textures: GeoTiffTileTextures): RenderPipeline => {
-    const pipeline: RenderPipeline = [
+    const colorModule = photometricModule();
+    return [
       {
-        module: CreateTexture,
+        module: seed,
         props: {
-          texture: { texture: textures.texture, target: gl.TEXTURE_2D },
+          texture: { texture: textures.texture, target: gl.TEXTURE_2D_ARRAY },
+          channelMap,
+          nodata: nodataSampled,
+          // 8-bit samples are normalised, so an alpha band is already in
+          // [0, 1].
+          alphaMax: 1,
+          nearest: isPalette,
+          size: new Float32Array([textures.width, textures.height]),
+          halo: textures.halo,
         },
       },
+      ...maskModule(gl, textures),
+      ...(colorModule ? [colorModule] : []),
     ];
-
-    if (nodata !== null) {
-      // `*unorm` sampling yields [0, 1], so the sentinel has to be scaled the
-      // same way.
-      const maxVal = 2 ** bitsPerSample[0]! - 1;
-      pipeline.push({
-        module: FilterNoDataVal,
-        props: { value: nodata / maxVal },
-      });
-    }
-
-    pipeline.push(...maskModule(gl, textures));
-
-    const colorModule = photometricModule({
-      samplesPerPixel,
-      photometric,
-      colormapTexture,
-      gl,
-    });
-    if (colorModule) {
-      pipeline.push(colorModule);
-    }
-
-    return pipeline;
   };
 
   return {
+    // No halo: see `fetchTilePixels`.
     loadTilePixels: (image, options) =>
-      fetchTilePixels(image, options, undefined, samplesPerPixel),
+      fetchTilePixels(image, options, undefined),
     uploadTileTextures: (glContext, pixels) =>
-      uploadTileTextures(glContext, pixels, { textureFormat, linearFilter }),
+      uploadTileTextures(glContext, pixels, textureFormat),
     buildPipeline,
     destroyTileTextures,
     prepare: (glContext) => {
@@ -586,23 +585,13 @@ function createUnormRenderer(
     },
   };
 
-  function photometricModule({
-    samplesPerPixel: count,
-    photometric: interpretation,
-    colormapTexture: cmap,
-    gl: glContext,
-  }: {
-    samplesPerPixel: number;
-    photometric: Photometric;
-    colormapTexture?: WebGLTexture;
-    gl: WebGL2RenderingContext;
-  }): RenderPipeline[number] | null {
-    if (count === 3 || count === 4) {
+  function photometricModule(): RenderPipeline[number] | null {
+    if (samplesPerPixel === 3 || samplesPerPixel === 4) {
       // Always interpret 3- or 4-band images as RGB/RGBA.
       return null;
     }
 
-    switch (interpretation) {
+    switch (photometric) {
       case Photometric.MinIsWhite:
         return { module: WhiteIsZero };
       case Photometric.MinIsBlack:
@@ -610,7 +599,7 @@ function createUnormRenderer(
       case Photometric.Rgb:
         return null;
       case Photometric.Palette: {
-        if (!cmap) {
+        if (!colormapTexture) {
           throw new Error(
             "buildPipeline needs the colormap texture: call prepare(gl) first",
           );
@@ -618,7 +607,7 @@ function createUnormRenderer(
         return {
           module: Colormap,
           props: {
-            colormap: { texture: cmap, target: glContext.TEXTURE_2D_ARRAY },
+            colormap: { texture: colormapTexture, target: gl.TEXTURE_2D_ARRAY },
           },
         };
       }
@@ -632,41 +621,102 @@ function createUnormRenderer(
       case Photometric.Cielab:
         return { module: CieLabToRGB };
       default:
-        throw new Error(
-          `Unsupported PhotometricInterpretation ${interpretation}`,
-        );
+        throw new Error(`Unsupported PhotometricInterpretation ${photometric}`);
     }
   }
 }
 
 /**
- * Fetch one tile's decoded pixels. With `haloCache`, the tile's in-image
- * neighbours are fetched through the cache too and their edge texels are
- * stitched around it (see `halo.ts`). A neighbour that fails to load
- * (sparse, corrupt, or a transient error) is left out of the halo, which
- * clamps that seam the way a tile on the image edge is clamped; only the
- * tile's own failure fails the load. Three-sample data is padded to four.
+ * Layer index per output channel `[r, g, b, a]` for the imagery seed, `-1`
+ * where no band feeds it: three bands are RGB, four RGBA, and one or two
+ * bands draw the first.
+ */
+function imageryChannelMap(samplesPerPixel: number): Int32Array {
+  switch (samplesPerPixel) {
+    case 1:
+    case 2:
+      return Int32Array.from([0, -1, -1, -1]);
+    case 3:
+      return Int32Array.from([0, 1, 2, -1]);
+    case 4:
+      return Int32Array.from([0, 1, 2, 3]);
+    default:
+      throw new Error(
+        `Unsupported SamplesPerPixel ${samplesPerPixel}. Only 1, 2, 3 or 4 are supported.`,
+      );
+  }
+}
+
+/** A decoded tile as band planes. */
+interface PlanarTile {
+  width: number;
+  height: number;
+  planes: RasterTypedArray[];
+  mask: Uint8Array | null;
+}
+
+/**
+ * The tile as band planes. A pixel-interleaved tile is converted in place,
+ * the first time it is seen: the halo cache hands the same `Tile` object to
+ * every load it serves as a neighbour, so this de-interleaves it once, and
+ * dropping the interleaved copy keeps the cache's byte budget honest.
+ */
+function planarTile(tile: Tile): PlanarTile {
+  const { array } = tile;
+  if (array.layout === "pixel-interleaved") {
+    const { width, height, count, mask, transform, crs, nodata } = array;
+    tile.array = {
+      layout: "band-separate",
+      width,
+      height,
+      count,
+      mask,
+      transform,
+      crs,
+      nodata,
+      bands: bandPlanes(array),
+    };
+  }
+  const { width, height, mask } = tile.array;
+  return { width, height, planes: bandPlanes(tile.array), mask };
+}
+
+/** One band of a planar tile, in the shape the halo stitcher reads. */
+function plane(tile: PlanarTile, band: number): Stitchable {
+  const { width, height, mask } = tile;
+  return { width, height, count: 1, data: tile.planes[band]!, mask };
+}
+
+/**
+ * Fetch one tile's decoded pixels as band planes.
+ *
+ * With `haloCache`, the tile's in-image neighbours are fetched through the
+ * cache too and their edge texels are stitched around each plane (see
+ * `halo.ts`). A neighbour that fails to load (sparse, corrupt, or a
+ * transient error) is left out of the halo, which clamps that seam the way
+ * a tile on the image edge is clamped; only the tile's own failure fails the
+ * load. Contours need this: without it every isoline breaks into a step at
+ * a seam.
+ *
+ * Without it, only the tile itself is fetched and the outer half texel
+ * clamps to the tile's own edge, as hardware filtering with `CLAMP_TO_EDGE`
+ * would. Imagery takes this path: the clamp is hard to see in a picture,
+ * and a halo would cost up to eight neighbour fetches and decodes per tile.
  */
 async function fetchTilePixels(
   image: GeoTIFF | Overview,
   options: Parameters<GeoTiffRenderer["loadTilePixels"]>[1],
   haloCache: DecodedTileCache | undefined,
-  samplesPerPixel: number,
 ): Promise<GeoTiffTilePixels> {
-  const samples = (array: RasterArrayPixelInterleaved): RasterTypedArray =>
-    samplesPerPixel === 3 ? addAlphaChannel(array).data : array.data;
-
   if (!haloCache) {
     const tile = await image.fetchTile(options.x, options.y, {
       boundless: false,
       pool: options.pool,
       signal: options.signal,
     });
-    const array = interleaved(tile.array);
-    const { width, height, mask } = array;
-    return { data: samples(array), width, height, halo: 0, mask };
+    const { planes, width, height, mask } = planarTile(tile);
+    return { planes, width, height, halo: 0, mask };
   }
-
   const { x: tilesAcross, y: tilesDown } = image.tileCount;
   const neighbours = neighbourCoordinates(
     options.x,
@@ -682,58 +732,46 @@ async function fetchTilePixels(
   if (own!.status === "rejected") {
     throw own!.reason;
   }
-  const centre = interleaved(own!.value.array);
-  const grid: Array<RasterArrayPixelInterleaved | undefined> = [];
+  const centre = planarTile(own!.value);
+  const grid: Array<PlanarTile | undefined> = [];
   neighbours.forEach((neighbour, i) => {
     const result = others[i]!;
     if (result.status === "fulfilled") {
-      grid[neighbourIndex(neighbour.offset)] = interleaved(result.value.array);
+      grid[neighbourIndex(neighbour.offset)] = planarTile(result.value);
     }
   });
+  const planes = centre.planes.map((_, band) =>
+    stitchHalo(
+      plane(centre, band),
+      grid.map((n) => n && plane(n, band)),
+    ),
+  );
   const { width, height, mask } = centre;
-  const padded: RasterArrayPixelInterleaved = {
-    ...centre,
-    width: width + 2 * HALO,
-    height: height + 2 * HALO,
-    data: stitchHalo(centre, grid),
-  };
-  return { data: samples(padded), width, height, halo: HALO, mask };
-}
-
-function interleaved(array: RasterArray): RasterArrayPixelInterleaved {
-  if (array.layout === "band-separate") {
-    throw new Error("Band-separate images not yet implemented.");
-  }
-  return array;
+  return { planes, width, height, halo: HALO, mask };
 }
 
 /**
- * The upload half, shared by every renderer; only the texture format and
- * filtering differ. Bracket-only, like everything in `texture.ts`.
+ * The upload half, shared by every renderer; only the texture format
+ * differs. The band planes become a texture array, plus the validity mask.
+ * Bracket-only, like everything in `texture.ts`.
  */
 function uploadTileTextures(
   gl: WebGL2RenderingContext,
   pixels: GeoTiffTilePixels,
-  {
-    textureFormat,
-    linearFilter,
-  }: {
-    textureFormat: ReturnType<typeof inferTextureFormat>;
-    linearFilter: boolean;
-  },
+  textureFormat: GLTextureFormat,
 ): GeoTiffTileTextures {
-  const { data, width, height, halo, mask } = pixels;
+  const { planes, width, height, halo, mask } = pixels;
   const paddedWidth = width + 2 * halo;
   const paddedHeight = height + 2 * halo;
 
-  const texture = createTexture2D(gl, {
+  const texture = createTextureArray(gl, {
     width: paddedWidth,
     height: paddedHeight,
-    data: toGlView(data),
+    planes: planes.map(toGlView),
     format: textureFormat,
-    linear: linearFilter,
   });
-  let byteLength = paddedWidth * paddedHeight * textureFormat.bytesPerPixel;
+  let byteLength =
+    paddedWidth * paddedHeight * planes.length * textureFormat.bytesPerPixel;
 
   let maskTexture: WebGLTexture | undefined;
   if (mask !== null) {
@@ -772,30 +810,21 @@ function createContourRenderer(
   gl: WebGL2RenderingContext,
   contour: ContourRenderOptions,
 ): GeoTiffRenderer {
-  const { bitsPerSample, sampleFormat, samplesPerPixel, nodata } =
-    geotiff.cachedTags;
+  const { samplesPerPixel } = geotiff.cachedTags;
   // Everything a tile's props need is resolved once here: `buildPipeline`
   // runs per tile and `getUniforms` per tile per frame, so no colour parsing
   // or array allocation may live there.
   const resolved = resolveContourOptions(contour, samplesPerPixel);
-  const { band } = resolved;
 
-  const uploadedSamples = samplesPerPixel === 3 ? 4 : samplesPerPixel;
-  const textureFormat = inferTextureFormat(
-    gl,
-    uploadedSamples,
-    bitsPerSample,
-    sampleFormat!,
-  );
+  const {
+    format: textureFormat,
+    denorm,
+    nodataSampled,
+  } = bandSampling(geotiff, gl);
   const seed = ValueTexture[textureFormat.sampler];
-
-  // A normalised texture samples as [0, 1]; every other format returns raw
-  // texel values. Fold the denormalisation into the seed's scale, and
-  // express the nodata sentinel in the same sampled units.
-  const denorm = textureFormat.normalized ? 2 ** bitsPerSample[0]! - 1 : 1;
+  const { band } = resolved;
   const scale = denorm * (geotiff.scales[band] ?? 1);
   const offset = geotiff.offsets[band] ?? 0;
-  const nodataSampled = nodata === null ? null : nodata / denorm;
 
   const colorTexture = (
     glContext: WebGL2RenderingContext,
@@ -911,7 +940,7 @@ function createContourRenderer(
       {
         module: seed,
         props: {
-          texture: { texture: textures.texture, target: gl.TEXTURE_2D },
+          texture: { texture: textures.texture, target: gl.TEXTURE_2D_ARRAY },
           band,
           nodata: nodataSampled,
           scale,
@@ -927,37 +956,6 @@ function createContourRenderer(
   };
 
   const pipelines = livePipelines(modulesFor);
-
-  const updateContour = (next: ResolvedContourOptions): void => {
-    // The seed's band index is what selects the texture channel; a change
-    // would need every tile's props rewritten and, for a multi-band raster,
-    // says the caller wants a different layer. Refuse rather than guess.
-    if (next.band !== band) {
-      throw new RangeError(
-        `setContour cannot change the band (${band} → ${next.band}); recreate the layer`,
-      );
-    }
-    pending = next;
-  };
-
-  const prepare = (glContext: WebGL2RenderingContext): void => {
-    if (!pending) {
-      return;
-    }
-    // Consumed before the attempt, so a failure is reported once rather than
-    // rethrown on every frame.
-    const next = pending;
-    pending = null;
-    // Create the new textures before deleting the old: if that fails the
-    // tiles keep a live texture and consistent (old) props.
-    const nextStyle = createStyle(glContext, next);
-    if (style) {
-      destroyStyle(glContext, style);
-    }
-    style = nextStyle;
-    pipelines.rebuild();
-  };
-
   // Contours interpolate `value` manually, so each tile carries a halo of
   // neighbour texels: without it the outer half texel clamps to the tile's
   // own edge and every isoline breaks into a step at the seam.
@@ -965,16 +963,28 @@ function createContourRenderer(
 
   return {
     loadTilePixels: (image, options) =>
-      fetchTilePixels(image, options, haloCache, samplesPerPixel),
-    // Filtering is irrelevant: the seed interpolates with texelFetch.
+      fetchTilePixels(image, options, haloCache),
     uploadTileTextures: (glContext, pixels) =>
-      uploadTileTextures(glContext, pixels, {
-        textureFormat,
-        linearFilter: false,
-      }),
+      uploadTileTextures(glContext, pixels, textureFormat),
     buildPipeline: pipelines.buildPipeline,
     destroyTileTextures: pipelines.destroyTileTextures,
-    prepare,
+    prepare: (glContext) => {
+      if (!pending) {
+        return;
+      }
+      // Consumed before the attempt, so a failure is reported once rather
+      // than rethrown on every frame.
+      const next = pending;
+      pending = null;
+      // Create the new textures before deleting the old: if that fails the
+      // tiles keep a live texture and consistent (old) props.
+      const nextStyle = createStyle(glContext, next);
+      if (style) {
+        destroyStyle(glContext, style);
+      }
+      style = nextStyle;
+      pipelines.rebuild();
+    },
     destroy: (glContext) => {
       haloCache.clear();
       pipelines.clear();
@@ -983,6 +993,16 @@ function createContourRenderer(
         style = undefined;
       }
     },
-    updateContour,
+    updateContour: (next) => {
+      // The seed's band is what selects the texture layer; a change would
+      // need every tile's props rewritten and, for a multi-band raster, says
+      // the caller wants a different layer. Refuse rather than guess.
+      if (next.band !== band) {
+        throw new RangeError(
+          `setContour cannot change the band (${band} → ${next.band}); recreate the layer`,
+        );
+      }
+      pending = next;
+    },
   };
 }
