@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { BandTexture, BlackIsZero } from "../src/gpu-modules/index.js";
+import {
+  BandTexture,
+  BlackIsZero,
+  LinearRescale,
+} from "../src/gpu-modules/index.js";
 import { pipelineKey } from "../src/shader/module.js";
 import { buildFragmentSource } from "../src/shader/sources.js";
 
@@ -89,13 +93,33 @@ describe("BandTexture", () => {
   });
 });
 
+describe("LinearRescale", () => {
+  it("rescales each colour channel with its own range", () => {
+    const min = new Float32Array([300, 400, 300]);
+    const max = new Float32Array([1500, 1200, 800]);
+    const bindings = LinearRescale.getUniforms!({ min, max });
+    expect(bindings.uniforms!.u_rescale_min).toBe(min);
+    expect(bindings.uniforms!.u_rescale_max).toBe(max);
+    expect(LinearRescale.fsDecl).toContain("uniform vec3 u_rescale_min;");
+    expect(LinearRescale.fsColor).toContain("color.rgb = clamp(");
+    expect(() =>
+      LinearRescale.getUniforms!({ min: new Float32Array(1), max }),
+    ).toThrow(RangeError);
+  });
+});
+
 describe("fragment assembly with imagery modules", () => {
   it("assembles a typed composite chain", () => {
-    const pipeline = [{ module: BandTexture.uint }, { module: BlackIsZero }];
+    const pipeline = [
+      { module: BandTexture.uint },
+      { module: LinearRescale },
+      { module: BlackIsZero },
+    ];
     const source = buildFragmentSource(pipeline);
     expect(source).toContain("uniform usampler2DArray u_band_texture;");
+    expect(source).toContain("uniform vec3 u_rescale_min;");
     expect(pipelineKey("globe", pipeline)).toBe(
-      "globe|band-texture-uint,black-is-zero",
+      "globe|band-texture-uint,linear-rescale,black-is-zero",
     );
   });
 });
