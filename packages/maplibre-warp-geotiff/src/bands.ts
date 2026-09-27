@@ -1,10 +1,19 @@
 /**
- * Which bands of a multi-band raster make up the picture. Pure: the tags come
- * in, uniform-ready values go out.
+ * Which bands of a multi-band raster make up the picture, and how they are
+ * stretched. Pure: the tags come in, uniform-ready values go out.
  */
 
 import type { TiffImage } from "@cogeotiff/core";
-import { Photometric, TiffTag } from "@cogeotiff/core";
+import { Photometric, SampleFormat, TiffTag } from "@cogeotiff/core";
+
+/** `[min, max]` in raw sample units, mapped onto `[0, 1]`. */
+export type RescalePair = readonly [min: number, max: number];
+
+/**
+ * One pair for every colour channel, or one pair per colour channel
+ * (`min(bands, 3)` pairs, in `bands` order).
+ */
+export type Rescale = RescalePair | ReadonlyArray<RescalePair>;
 
 /** How imagery is composed from a raster's bands. */
 export interface ImageryRenderOptions {
@@ -13,6 +22,12 @@ export interface ImageryRenderOptions {
    * Defaults from the TIFF tags, see {@link resolveBandSelection}.
    */
   bands?: readonly number[];
+  /**
+   * Linear stretch of the colour channels. Required for anything but 8-bit
+   * unsigned samples, which default to their full range. The alpha band is
+   * never rescaled: it is divided by the sample type's maximum.
+   */
+  rescale?: Rescale;
 }
 
 /** TIFF `ExtraSamples` values that mark a band as alpha. */
@@ -186,14 +201,131 @@ export function channelMap(selection: readonly number[]): Int32Array {
   return map;
 }
 
+/** Per-channel stretch, ready for `LinearRescale`. */
+export interface ResolvedRescale {
+  min: Float32Array;
+  max: Float32Array;
+}
+
+/** Normalise a {@link Rescale} to a list of pairs, validating each. */
+export function validateRescale(rescale: Rescale): RescalePair[] {
+  const pairs: RescalePair[] =
+    typeof rescale[0] === "number"
+      ? [rescale as RescalePair]
+      : [...(rescale as ReadonlyArray<RescalePair>)];
+  if (pairs.length !== 1 && pairs.length !== 3) {
+    throw new RangeError(
+      `rescale needs one [min, max] pair or one per colour channel (3), got ${pairs.length}`,
+    );
+  }
+  for (const pair of pairs) {
+    if (
+      pair.length !== 2 ||
+      !Number.isFinite(pair[0]) ||
+      !Number.isFinite(pair[1])
+    ) {
+      throw new RangeError(
+        `rescale pairs must be two finite numbers, got ${JSON.stringify(pair)}`,
+      );
+    }
+    if (pair[1] <= pair[0]) {
+      throw new RangeError(
+        `rescale max must exceed min, got [${pair[0]}, ${pair[1]}]`,
+      );
+    }
+  }
+  return pairs;
+}
+
+/** A per-channel stretch must have one pair per colour channel of the selection. */
+function checkRescaleFits(pairs: RescalePair[], selectedCount: number): void {
+  const colourChannels = Math.min(selectedCount, 3);
+  if (pairs.length !== 1 && pairs.length !== colourChannels) {
+    throw new RangeError(
+      `${pairs.length} rescale pairs given for ${colourChannels} colour channel(s)`,
+    );
+  }
+}
+
+export interface RescaleTags {
+  /** Bands in the selection, so a per-channel rescale can be checked. */
+  selectedCount: number;
+  bitsPerSample: number;
+  sampleFormat: SampleFormat;
+  /**
+   * What a sampled value is multiplied by to reach raw units: `2^bits − 1`
+   * for a normalised texture, else 1. The stretch is expressed in sampled
+   * units, so it is divided by this.
+   */
+  denorm: number;
+}
+
+/**
+ * The stretch for `LinearRescale`, or `null` for none.
+ *
+ * Without `rescale`, 8-bit unsigned samples keep their full range and need
+ * no module; every other type has no sensible default, so it is an error
+ * rather than a guess.
+ */
+export function resolveRescale(
+  rescale: Rescale | undefined,
+  tags: RescaleTags,
+): ResolvedRescale | null {
+  const { selectedCount, bitsPerSample, sampleFormat, denorm } = tags;
+  if (rescale === undefined) {
+    if (sampleFormat === SampleFormat.Uint && bitsPerSample === 8) {
+      return null;
+    }
+    throw new RangeError(
+      `${bitsPerSample}-bit ${SampleFormat[sampleFormat]} imagery needs \`rescale\` ([min, max] in sample units)`,
+    );
+  }
+  const pairs = validateRescale(rescale);
+  checkRescaleFits(pairs, selectedCount);
+  const min = new Float32Array(3);
+  const max = new Float32Array(3);
+  for (let c = 0; c < 3; c++) {
+    // One pair for every channel, or (checked above) exactly one per channel.
+    const pair = pairs.length === 1 ? pairs[0]! : pairs[c]!;
+    min[c] = pair[0] / denorm;
+    max[c] = pair[1] / denorm;
+  }
+  return { min, max };
+}
+
 /**
  * Check imagery options as far as they can be without the file: the band
- * list's shape. Range against the file is checked by
+ * list's shape, the stretch's shape, and that the two fit each other when
+ * both are given. Range against the file is checked by
  * {@link resolveImageryOptions}.
  */
 export function validateImageryOptions(options: ImageryRenderOptions): void {
-  if (options.bands !== undefined) {
-    validateBandList(options.bands);
+  const { bands, rescale } = options;
+  if (bands !== undefined) {
+    validateBandList(bands);
+  }
+  if (rescale !== undefined) {
+    const pairs = validateRescale(rescale);
+    if (bands !== undefined) {
+      checkRescaleFits(pairs, bands.length);
+    }
+  }
+}
+
+/** The largest value a sample type holds: what an alpha band is divided by. */
+export function sampleTypeMax(
+  bitsPerSample: number,
+  sampleFormat: SampleFormat,
+): number {
+  switch (sampleFormat) {
+    case SampleFormat.Uint:
+      return 2 ** bitsPerSample - 1;
+    case SampleFormat.Int:
+      return 2 ** (bitsPerSample - 1) - 1;
+    case SampleFormat.Float:
+      return 1;
+    default:
+      throw new RangeError(`Unsupported SampleFormat ${sampleFormat}`);
   }
 }
 
@@ -242,18 +374,32 @@ function colorConversion(
 export interface ResolvedImagery {
   selection: number[];
   channelMap: Int32Array;
+  rescale: ResolvedRescale | null;
   color: ColorConversion;
+}
+
+export interface ImageryTags extends BandSelectionTags {
+  bitsPerSample: number;
+  sampleFormat: SampleFormat;
+  /** See {@link RescaleTags.denorm}. */
+  denorm: number;
 }
 
 /** Resolve and validate the imagery options in one pass. */
 export function resolveImageryOptions(
   options: ImageryRenderOptions,
-  tags: BandSelectionTags,
+  tags: ImageryTags,
 ): ResolvedImagery {
   const selection = resolveBandSelection(tags, options.bands);
   return {
     selection,
     channelMap: channelMap(selection),
+    rescale: resolveRescale(options.rescale, {
+      selectedCount: selection.length,
+      bitsPerSample: tags.bitsPerSample,
+      sampleFormat: tags.sampleFormat,
+      denorm: tags.denorm,
+    }),
     color: colorConversion(tags.photometric, selection.length),
   };
 }

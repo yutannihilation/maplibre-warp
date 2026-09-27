@@ -1,7 +1,9 @@
 export type {
-  BandSelectionTags,
   ColorConversion,
   ImageryRenderOptions,
+  ImageryTags,
+  Rescale,
+  RescalePair,
   ResolvedImagery,
 } from "./bands.js";
 export {

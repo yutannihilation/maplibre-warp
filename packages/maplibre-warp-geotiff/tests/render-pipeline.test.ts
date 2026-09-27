@@ -138,14 +138,115 @@ describe("inferRenderPipeline for imagery", () => {
     vi.unstubAllGlobals();
   });
 
+  const naip = fakeGeoTiff({
+    sampleFormat: SampleFormat.Uint,
+    bitsPerSample: 8,
+    samplesPerPixel: 4,
+    photometric: Photometric.Rgb,
+  });
+  const maxar = fakeGeoTiff({
+    sampleFormat: SampleFormat.Uint,
+    bitsPerSample: 16,
+    samplesPerPixel: 8,
+    nodata: 0,
+  });
   const seedProps = (renderer: ReturnType<typeof inferRenderPipeline>) =>
     renderer.buildPipeline(textures)[0]!.props as {
-      texture: { target: unknown };
       channelMap: Int32Array;
       nodata: number | null;
       alphaMax: number;
       nearest: boolean;
     };
+
+  it("draws NAIP's RGB and leaves its near-infrared band out", () => {
+    const renderer = preparedRenderer(naip, stubGl(), {
+      extraSamples: [0],
+    });
+    expect(moduleNames(renderer.buildPipeline(textures))).toEqual([
+      "band-texture-float",
+    ]);
+    expect(Array.from(seedProps(renderer).channelMap)).toEqual([0, 1, 2, -1]);
+    // Normalised texture: alpha would already be in [0, 1].
+    expect(seedProps(renderer)).toMatchObject({ alphaMax: 1, nearest: false });
+  });
+
+  it("composes a uint16 multispectral file with a stretch", () => {
+    const renderer = preparedRenderer(maxar, stubGl(), {
+      bands: [4, 2, 1],
+      rescale: [0, 2000],
+    });
+    const pipeline = renderer.buildPipeline({
+      ...textures,
+      mask: {} as WebGLTexture,
+    });
+    expect(moduleNames(pipeline)).toEqual([
+      "band-texture-uint",
+      "mask-texture",
+      "linear-rescale",
+    ]);
+    expect(Array.from(seedProps(renderer).channelMap)).toEqual([4, 2, 1, -1]);
+    expect(seedProps(renderer)).toMatchObject({ nodata: 0, alphaMax: 65535 });
+    expect(Array.from(pipeline[2]!.props.max)).toEqual([2000, 2000, 2000]);
+  });
+
+  it("broadcasts a single band to grey, whatever the file's photometric", () => {
+    const renderer = preparedRenderer(maxar, stubGl(), {
+      bands: [6],
+      rescale: [1000, 3600],
+    });
+    expect(moduleNames(renderer.buildPipeline(textures))).toEqual([
+      "band-texture-uint",
+      "linear-rescale",
+      "black-is-zero",
+    ]);
+    const green = preparedRenderer(naip, stubGl(), { bands: [1] });
+    expect(moduleNames(green.buildPipeline(textures))).toEqual([
+      "band-texture-float",
+      "black-is-zero",
+    ]);
+  });
+
+  it("samples palette rasters nearest and looks them up in the colormap", () => {
+    // `parseColormap` builds an ImageData, which jsdom does not provide.
+    vi.stubGlobal(
+      "ImageData",
+      class {
+        constructor(
+          readonly data: Uint8ClampedArray,
+          readonly width: number,
+          readonly height: number,
+        ) {}
+      },
+    );
+    const renderer = preparedRenderer(
+      fakeGeoTiff({
+        sampleFormat: SampleFormat.Uint,
+        bitsPerSample: 8,
+        photometric: Photometric.Palette,
+        colorMap: new Uint16Array(3 * 256),
+        nodata: 250,
+      }),
+      stubGl(),
+    );
+    const pipeline = renderer.buildPipeline(textures);
+    expect(moduleNames(pipeline)).toEqual(["band-texture-float", "colormap"]);
+    expect(seedProps(renderer)).toMatchObject({
+      nearest: true,
+      nodata: 250 / 255,
+    });
+  });
+
+  it("rejects what the tags cannot support, before any tile is loaded", () => {
+    // Eight bands and no selection.
+    expect(() => inferRenderPipeline(maxar, stubGl())).toThrow(RangeError);
+    // uint16 without a stretch.
+    expect(() =>
+      inferRenderPipeline(maxar, stubGl(), { bands: [4, 2, 1] }),
+    ).toThrow(/needs `rescale`/);
+    expect(() =>
+      inferRenderPipeline(naip, stubGl(), { bands: [0, 1, 4] }),
+    ).toThrow(/out of range/);
+  });
 
   it("draws three 8-bit bands as RGB from the band array", () => {
     const rgb = preparedRenderer(
@@ -177,8 +278,8 @@ describe("inferRenderPipeline for imagery", () => {
       photometric: Photometric.Rgb,
     });
     // NAIP: RGB + near-infrared, ExtraSamples = 0 (unspecified).
-    const naip = preparedRenderer(fourBands, stubGl(), { extraSamples: [0] });
-    expect(Array.from(seedProps(naip).channelMap)).toEqual([0, 1, 2, -1]);
+    const nir = preparedRenderer(fourBands, stubGl(), { extraSamples: [0] });
+    expect(Array.from(seedProps(nir).channelMap)).toEqual([0, 1, 2, -1]);
     const rgba = preparedRenderer(fourBands, stubGl(), { extraSamples: [2] });
     expect(Array.from(seedProps(rgba).channelMap)).toEqual([0, 1, 2, 3]);
     // Normalised texture: alpha is already in [0, 1].
@@ -186,12 +287,6 @@ describe("inferRenderPipeline for imagery", () => {
   });
 
   it("draws the requested bands, broadcasting a single one to grey", () => {
-    const naip = fakeGeoTiff({
-      sampleFormat: SampleFormat.Uint,
-      bitsPerSample: 8,
-      samplesPerPixel: 4,
-      photometric: Photometric.Rgb,
-    });
     const falseColour = preparedRenderer(naip, stubGl(), {
       bands: [3, 0, 1],
       extraSamples: [0],
@@ -263,7 +358,7 @@ describe("inferRenderPipeline for imagery", () => {
     expect(seedProps(grey).nodata).toBe(1);
   });
 
-  it("samples palette rasters nearest and looks them up in the colormap", () => {
+  it("refuses to build a palette pipeline before prepare has created the colormap", () => {
     // `parseColormap` builds an ImageData, which jsdom does not provide.
     vi.stubGlobal(
       "ImageData",
@@ -275,30 +370,19 @@ describe("inferRenderPipeline for imagery", () => {
         ) {}
       },
     );
-    const geotiff = fakeGeoTiff({
-      sampleFormat: SampleFormat.Uint,
-      bitsPerSample: 8,
-      photometric: Photometric.Palette,
-      colorMap: new Uint16Array(3 * 256),
-    });
-    const unprepared = inferRenderPipeline(geotiff, stubGl());
-    expect(() => unprepared.buildPipeline(textures)).toThrow(/prepare\(gl\)/);
-
-    const renderer = preparedRenderer(geotiff, stubGl());
-    expect(moduleNames(renderer.buildPipeline(textures))).toEqual([
-      "band-texture-float",
-      "colormap",
-    ]);
-    expect(seedProps(renderer).nearest).toBe(true);
+    const renderer = inferRenderPipeline(
+      fakeGeoTiff({
+        sampleFormat: SampleFormat.Uint,
+        bitsPerSample: 8,
+        photometric: Photometric.Palette,
+        colorMap: new Uint16Array(3 * 256),
+      }),
+      stubGl(),
+    );
+    expect(() => renderer.buildPipeline(textures)).toThrow(/prepare\(gl\)/);
   });
 
-  it("rejects non-8-bit rasters, and files with no default composite", () => {
-    expect(() =>
-      preparedRenderer(
-        fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
-        stubGl(),
-      ),
-    ).toThrow(/supported so far/);
+  it("refuses files with no default composite unless bands are given", () => {
     expect(() =>
       preparedRenderer(
         fakeGeoTiff({

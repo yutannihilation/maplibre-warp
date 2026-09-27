@@ -218,10 +218,10 @@ records a re-style for the next `prerender`.
    whether a fourth band is alpha or data. `inferRenderPipeline`
    (`render-pipeline.ts`) then reads `SampleFormat`, `BitsPerSample`,
    `SamplesPerPixel`, `PhotometricInterpretation`, `ColorMap` and nodata from
-   the tags, resolves the layer's `bands` (or its contour options) against
-   them, and returns a `GeoTiffRenderer`: a GL-free tile loader, a
-   bracket-only texture uploader, and a function that builds the shader
-   module chain for a tile. A `RangeError` here says the options do not fit
+   the tags, resolves the layer's `bands` and `rescale` (or its contour
+   options) against them, and returns a `GeoTiffRenderer`: a GL-free tile
+   loader, a bracket-only texture uploader, and a function that builds the
+   shader module chain for a tile. A `RangeError` here says the options do not fit
    the file, which no retry can change, so it is rethrown as an
    `UnrecoverableSourceError` and the source is not retried. A palette
    image's `ColorMap` is parsed here too, so a missing or malformed one fails
@@ -315,11 +315,11 @@ becomes its own layer of an array texture (section 2.5):
 textures: the contour colour lookups are `RGBA8`. Integer formats cannot be
 `LINEAR`-filtered and float32 needs `OES_texture_float_linear`, so rather than
 depend on the hardware for some types and not others, the seeds read texels
-with `texelFetch` and interpolate themselves. The contour path accepts every
-row; imagery is still limited to 8-bit unsigned samples. A normalised texture
-samples as `[0, 1]` and every other one as raw values, so each renderer
-carries `denorm`, the type's maximum for `R8` and 1 otherwise, to express
-nodata and GDAL scale/offset in sampled units.
+with `texelFetch` and interpolate themselves. Every row therefore works for
+both imagery and contours. A normalised texture samples as `[0, 1]` and every
+other one as raw values, so each renderer carries `denorm`, the type's maximum
+for `R8` and 1 otherwise, to express nodata, the stretch and GDAL scale/offset
+in sampled units.
 
 ### 2.5 Uploading, in `prerender`
 
@@ -533,8 +533,9 @@ rather than a colour. In the imagery chains the seed, `BandTexture`, reads up
 to four layers of the band array, as the channel map `[r, g, b, a]` names
 them, and composes `color` in sampled units (section 2.4), bringing an alpha
 band to `[0, 1]`. It discards the pixel if any colour band is NaN or the
-nodata sentinel. Later modules apply the mask, convert photometric
-interpretations or look up a colormap. In the contour chains the seed,
+nodata sentinel. Later modules apply the mask, stretch the colour channels to
+`[0, 1]` (`LinearRescale`), convert photometric interpretations or look up a
+colormap. In the contour chains the seed,
 `ValueTexture`, interpolates one layer and sets `value` in data units and
 `valid`, which is zero if any of the four texels is NaN or the nodata
 sentinel. Both seeds interpolate by hand from four `texelFetch` taps
@@ -550,10 +551,11 @@ fragColor = vec4(color.rgb * color.a * u_opacity, color.a * u_opacity);
 which is the premultiplied form MapLibre's blend function expects.
 
 The chain for a tile is decided by `GeoTiffRenderer.buildPipeline`, in the
-order seed → mask → colour. For an 8-bit RGB COG it is `BandTexture` alone; a
-mask adds `MaskTexture`. A single-band grayscale image, or one band selected
-from a multi-band file, adds `BlackIsZero` to draw it as grey, and a palette
-image is `BandTexture → Colormap`. Each module instance carries
+order seed → mask → stretch → colour. For an 8-bit RGB COG it is
+`BandTexture` alone, since 8-bit samples need no stretch; a mask adds
+`MaskTexture`. A uint16 multispectral composite is
+`BandTexture → LinearRescale`, one selected band adds `BlackIsZero` to draw
+it as grey, and a palette image is `BandTexture → Colormap`. Each module instance carries
 the props (a texture binding, a channel map, a nodata value) that
 `getUniforms` turns into uniform values at draw time. The contour renderer shares its fill and line module instances
 by reference across every tile's chain, which is what lets `prepare` re-style
