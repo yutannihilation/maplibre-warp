@@ -185,6 +185,44 @@ describe("inferRenderPipeline for imagery", () => {
     expect(seedProps(rgba).alphaMax).toBe(1);
   });
 
+  it("draws the requested bands, broadcasting a single one to grey", () => {
+    const naip = fakeGeoTiff({
+      sampleFormat: SampleFormat.Uint,
+      bitsPerSample: 8,
+      samplesPerPixel: 4,
+      photometric: Photometric.Rgb,
+    });
+    const falseColour = preparedRenderer(naip, stubGl(), {
+      bands: [3, 0, 1],
+      extraSamples: [0],
+    });
+    expect(moduleNames(falseColour.buildPipeline(textures))).toEqual([
+      "band-texture-float",
+    ]);
+    expect(Array.from(seedProps(falseColour).channelMap)).toEqual([
+      3, 0, 1, -1,
+    ]);
+    const nir = preparedRenderer(naip, stubGl(), { bands: [3] });
+    expect(moduleNames(nir.buildPipeline(textures))).toEqual([
+      "band-texture-float",
+      "black-is-zero",
+    ]);
+    // A five-band file has no default, but an explicit selection draws.
+    const five = preparedRenderer(
+      fakeGeoTiff({
+        sampleFormat: SampleFormat.Uint,
+        bitsPerSample: 8,
+        samplesPerPixel: 5,
+      }),
+      stubGl(),
+      { bands: [4, 2, 1] },
+    );
+    expect(Array.from(seedProps(five).channelMap)).toEqual([4, 2, 1, -1]);
+    expect(() =>
+      inferRenderPipeline(naip, stubGl(), { bands: [0, 1, 4] }),
+    ).toThrow(/out of range/);
+  });
+
   it("converts CMYK as a whole", () => {
     const renderer = preparedRenderer(
       fakeGeoTiff({

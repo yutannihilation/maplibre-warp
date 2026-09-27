@@ -1,12 +1,14 @@
 export type {
   BandSelectionTags,
   ColorConversion,
+  ImageryRenderOptions,
   ResolvedImagery,
 } from "./bands.js";
 export {
   readExtraSamples,
   resolveBandSelection,
-  resolveImagery,
+  resolveImageryOptions,
+  validateImageryOptions,
 } from "./bands.js";
 export type { COGLayerProps } from "./cog-layer.js";
 export { COGLayer } from "./cog-layer.js";

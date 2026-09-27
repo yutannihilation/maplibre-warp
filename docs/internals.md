@@ -218,7 +218,7 @@ records a re-style for the next `prerender`.
    whether a fourth band is alpha or data. `inferRenderPipeline`
    (`render-pipeline.ts`) then reads `SampleFormat`, `BitsPerSample`,
    `SamplesPerPixel`, `PhotometricInterpretation`, `ColorMap` and nodata from
-   the tags, resolves the bands to draw (or the contour options) against
+   the tags, resolves the layer's `bands` (or its contour options) against
    them, and returns a `GeoTiffRenderer`: a GL-free tile loader, a
    bracket-only texture uploader, and a function that builds the shader
    module chain for a tile. A `RangeError` here says the options do not fit
@@ -551,8 +551,9 @@ which is the premultiplied form MapLibre's blend function expects.
 
 The chain for a tile is decided by `GeoTiffRenderer.buildPipeline`, in the
 order seed → mask → colour. For an 8-bit RGB COG it is `BandTexture` alone; a
-mask adds `MaskTexture`. A single-band grayscale image adds `BlackIsZero`,
-and a palette image is `BandTexture → Colormap`. Each module instance carries
+mask adds `MaskTexture`. A single-band grayscale image, or one band selected
+from a multi-band file, adds `BlackIsZero` to draw it as grey, and a palette
+image is `BandTexture → Colormap`. Each module instance carries
 the props (a texture binding, a channel map, a nodata value) that
 `getUniforms` turns into uniform values at draw time. The contour renderer shares its fill and line module instances
 by reference across every tile's chain, which is what lets `prepare` re-style

@@ -102,13 +102,24 @@ is compiled per distinct module chain.
 ### Bands
 
 Every band of a tile is uploaded once, as one single-channel layer of a
-`TEXTURE_2D_ARRAY`, whatever the file's `PlanarConfiguration`. The
-photometric interpretation decides which bands make the picture: a palette
-draws its index band, CMYK its four channels, an RGB file its three colour
-bands plus the fourth when `ExtraSamples` declares that band alpha — NAIP's
-fourth band is near-infrared and is left out. A grey file draws one band as
-grey and three or four as RGB(A) by the same alpha rule; grey + alpha and
-grey stacks of five or more bands have no default and are refused. Samples
+`TEXTURE_2D_ARRAY`, whatever the file's `PlanarConfiguration`. `bands` picks
+which of them make the picture:
+
+```ts
+// NAIP: red, green, blue and near-infrared. Bands are 0-based file indices.
+const layer = new COGLayer({
+  id: "naip",
+  geotiff: "https://example.com/naip.tif",
+  bands: [3, 0, 1], // false-colour infrared; [3] draws one band as grey
+});
+```
+
+Without `bands`, the photometric interpretation decides: a palette draws its
+index band, CMYK its four channels, an RGB file its three colour bands plus
+the fourth when `ExtraSamples` declares that band alpha — NAIP's fourth band
+is near-infrared and is left out. A grey file draws one band as grey and
+three or four as RGB(A) by the same alpha rule; grey + alpha and grey stacks
+of five or more bands have no default and need `bands`. Samples
 are read with an exactly typed sampler (`sampler2DArray`, `usampler2DArray`,
 `isampler2DArray`) and interpolated bilinearly in the shader, so nodata is
 exact: a pixel is nodata when any of its colour bands is (palette rasters

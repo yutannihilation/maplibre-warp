@@ -189,3 +189,21 @@ describe("COGLayer contour configuration", () => {
     });
   });
 });
+
+describe("COGLayer imagery configuration", () => {
+  it("fails fast in the constructor on a malformed selection", () => {
+    expect(() => new COGLayer({ id: "i1", geotiff, bands: [0, 1] })).toThrow(
+      RangeError,
+    );
+    expect(() => new COGLayer({ id: "i2", geotiff, bands: [-1] })).toThrow(
+      RangeError,
+    );
+  });
+
+  it("accepts what only the file can check, deferring the rest", () => {
+    // Band 12 may or may not exist: that is checked when the header is read.
+    expect(
+      () => new COGLayer({ id: "i5", geotiff, bands: [12] }),
+    ).not.toThrow();
+  });
+});

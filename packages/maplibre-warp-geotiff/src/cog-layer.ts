@@ -39,7 +39,8 @@ import {
 } from "@yutannihilation/maplibre-warp-raster";
 import type { CustomRenderMethodInput, Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
-import { readExtraSamples } from "./bands.js";
+import type { ImageryRenderOptions } from "./bands.js";
+import { readExtraSamples, validateImageryOptions } from "./bands.js";
 import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
 import { abortError, fetchGeoTIFF } from "./geotiff-utils.js";
 import type {
@@ -61,7 +62,9 @@ import {
  */
 const DEFAULT_CONCURRENCY_LIMITER = new PerOriginSemaphore({ maxRequests: 6 });
 
-export interface COGLayerProps extends RasterCustomLayerProps {
+export interface COGLayerProps
+  extends RasterCustomLayerProps,
+    ImageryRenderOptions {
   /**
    * The Cloud-Optimized GeoTIFF: a URL, an `ArrayBuffer` holding the whole
    * file, or an already-opened {@link GeoTIFF}.
@@ -96,7 +99,7 @@ export interface COGLayerProps extends RasterCustomLayerProps {
    * Render the raster as contours — filled bands or a continuous gradient,
    * with or without lines — instead of as imagery. See
    * {@link ContourRenderOptions}; {@link COGLayer.setContour} switches
-   * between them live.
+   * between them live. `bands` is ignored with `contour`.
    */
   contour?: ContourRenderOptions;
 
@@ -134,17 +137,22 @@ export class COGLayer extends RasterCustomLayer {
   private contourBands: ContourBandWithColor[] = [];
   /** Gradient model of {@link contour}, likewise. */
   private contourGradient: ContourGradient | null = null;
+  /** Imagery options, from the props. */
+  private imagery: ImageryRenderOptions;
   private renderer?: GeoTiffRenderer;
   private geotiff?: GeoTIFF;
 
   constructor(props: COGLayerProps) {
     super(props);
+    // Fail here rather than inside the retried source-open path; what
+    // depends on the file's tags is checked again when they are known.
     if (props.contour) {
-      // Fail here rather than inside the retried source-open path.
       this.rememberContourModel(resolveContourOptions(props.contour));
     }
+    validateImageryOptions(props);
     this.props = props;
     this.contour = props.contour;
+    this.imagery = { bands: props.bands };
   }
 
   private rememberContourModel(resolved: ResolvedContourOptions): void {
@@ -353,6 +361,7 @@ export class COGLayer extends RasterCustomLayer {
     try {
       renderer = inferRenderPipeline(geotiff, gl, {
         contour: this.contour,
+        ...this.imagery,
         extraSamples,
       });
     } catch (error) {
