@@ -39,6 +39,7 @@ import {
 } from "@yutannihilation/maplibre-warp-raster";
 import type { CustomRenderMethodInput, Map as MapLibreMap } from "maplibre-gl";
 import proj4 from "proj4";
+import { readExtraSamples } from "./bands.js";
 import { geoTiffToDescriptor, imageForLevel } from "./geotiff-tileset.js";
 import { abortError, fetchGeoTIFF } from "./geotiff-utils.js";
 import type {
@@ -284,8 +285,13 @@ export class COGLayer extends RasterCustomLayer {
 
     const crs = geotiff.crs;
     const resolveEpsg = this.props.epsgResolver ?? defaultEpsgResolver;
-    const sourceProjection =
-      typeof crs === "number" ? await resolveEpsg(crs) : parseWkt(crs);
+    // Two independent reads — an EPSG lookup and a tag the library does not
+    // prefetch, which decides whether a fourth band is alpha or data — so
+    // they overlap. Contours read one band and never need the tag.
+    const [sourceProjection, extraSamples] = await Promise.all([
+      typeof crs === "number" ? resolveEpsg(crs) : parseWkt(crs),
+      this.contour ? null : readExtraSamples(geotiff.image),
+    ]);
     if (signal.aborted) {
       return null;
     }
@@ -347,6 +353,7 @@ export class COGLayer extends RasterCustomLayer {
     try {
       renderer = inferRenderPipeline(geotiff, gl, {
         contour: this.contour,
+        extraSamples,
       });
     } catch (error) {
       // Every I/O is done by now: a RangeError here says the options do not

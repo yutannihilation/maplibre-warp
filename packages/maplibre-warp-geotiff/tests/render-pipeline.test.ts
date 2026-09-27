@@ -147,7 +147,7 @@ describe("inferRenderPipeline for imagery", () => {
       nearest: boolean;
     };
 
-  it("draws three 8-bit bands as RGB and four as RGBA from the band array", () => {
+  it("draws three 8-bit bands as RGB from the band array", () => {
     const rgb = preparedRenderer(
       fakeGeoTiff({
         sampleFormat: SampleFormat.Uint,
@@ -167,19 +167,39 @@ describe("inferRenderPipeline for imagery", () => {
       nearest: false,
     });
     expect(Array.from(seedProps(rgb).channelMap)).toEqual([0, 1, 2, -1]);
+  });
 
-    const rgba = preparedRenderer(
+  it("takes a fourth band as alpha only when ExtraSamples says so", () => {
+    const fourBands = fakeGeoTiff({
+      sampleFormat: SampleFormat.Uint,
+      bitsPerSample: 8,
+      samplesPerPixel: 4,
+      photometric: Photometric.Rgb,
+    });
+    // NAIP: RGB + near-infrared, ExtraSamples = 0 (unspecified).
+    const naip = preparedRenderer(fourBands, stubGl(), { extraSamples: [0] });
+    expect(Array.from(seedProps(naip).channelMap)).toEqual([0, 1, 2, -1]);
+    const rgba = preparedRenderer(fourBands, stubGl(), { extraSamples: [2] });
+    expect(Array.from(seedProps(rgba).channelMap)).toEqual([0, 1, 2, 3]);
+    // Normalised texture: alpha is already in [0, 1].
+    expect(seedProps(rgba).alphaMax).toBe(1);
+  });
+
+  it("converts CMYK as a whole", () => {
+    const renderer = preparedRenderer(
       fakeGeoTiff({
         sampleFormat: SampleFormat.Uint,
         bitsPerSample: 8,
         samplesPerPixel: 4,
-        photometric: Photometric.Rgb,
+        photometric: Photometric.Separated,
       }),
       stubGl(),
     );
-    expect(Array.from(seedProps(rgba).channelMap)).toEqual([0, 1, 2, 3]);
-    // Normalised texture: alpha is already in [0, 1].
-    expect(seedProps(rgba).alphaMax).toBe(1);
+    expect(moduleNames(renderer.buildPipeline(textures))).toEqual([
+      "band-texture-float",
+      "cmyk-to-rgb",
+    ]);
+    expect(Array.from(seedProps(renderer).channelMap)).toEqual([0, 1, 2, 3]);
   });
 
   it("converts a single band by its photometric interpretation", () => {
@@ -234,7 +254,7 @@ describe("inferRenderPipeline for imagery", () => {
     expect(seedProps(renderer).nearest).toBe(true);
   });
 
-  it("still rejects non-8-bit rasters and more than four bands", () => {
+  it("rejects non-8-bit rasters, and files with no default composite", () => {
     expect(() =>
       preparedRenderer(
         fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
@@ -250,7 +270,19 @@ describe("inferRenderPipeline for imagery", () => {
         }),
         stubGl(),
       ),
-    ).toThrow(/SamplesPerPixel 5/);
+    ).toThrow(/5-band raster has no default/);
+    // Grey + alpha.
+    expect(() =>
+      preparedRenderer(
+        fakeGeoTiff({
+          sampleFormat: SampleFormat.Uint,
+          bitsPerSample: 8,
+          samplesPerPixel: 2,
+        }),
+        stubGl(),
+        { extraSamples: [2] },
+      ),
+    ).toThrow(RangeError);
   });
 });
 

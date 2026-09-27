@@ -54,6 +54,8 @@ import {
   WhiteIsZero,
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 
+import type { ColorConversion } from "./bands.js";
+import { resolveImagery, validateBandIndex } from "./bands.js";
 import { bandPlanes, toGlView } from "./geotiff-utils.js";
 import type { Stitchable } from "./halo.js";
 import {
@@ -241,14 +243,7 @@ export function resolveContourOptions(
 ): ResolvedContourOptions {
   const thresholds = packThresholds(contour.thresholds);
   const band = contour.band ?? 0;
-  if (!Number.isInteger(band) || band < 0) {
-    throw new RangeError(`band must be a non-negative integer, got ${band}`);
-  }
-  if (samplesPerPixel !== undefined && band >= samplesPerPixel) {
-    throw new RangeError(
-      `band ${band} is out of range for a ${samplesPerPixel}-band raster`,
-    );
-  }
+  validateBandIndex(band, samplesPerPixel);
   const fill = contour.fill ?? "bands";
   if (!FILLS.includes(fill)) {
     throw new RangeError(
@@ -407,10 +402,21 @@ export interface GeoTiffRenderer {
   updateContour?(contour: ResolvedContourOptions): void;
 }
 
+export interface InferRenderPipelineOptions {
+  /** Render as contours instead of imagery. */
+  contour?: ContourRenderOptions;
+  /**
+   * The primary IFD's `ExtraSamples` tag (see `readExtraSamples`), which
+   * decides whether a fourth band is alpha. Absent or `null` means the tag
+   * is absent.
+   */
+  extraSamples?: readonly number[] | null;
+}
+
 export function inferRenderPipeline(
   geotiff: GeoTIFF,
   gl: WebGL2RenderingContext,
-  options: { contour?: ContourRenderOptions } = {},
+  options: InferRenderPipelineOptions = {},
 ): GeoTiffRenderer {
   const { sampleFormat, bitsPerSample } = geotiff.cachedTags;
   if (sampleFormat === null) {
@@ -429,7 +435,7 @@ export function inferRenderPipeline(
       `Only 8-bit samples are supported so far; found BitsPerSample ${bitsPerSample[0]}.`,
     );
   }
-  return createImageryRenderer(geotiff, gl);
+  return createImageryRenderer(geotiff, gl, options);
 }
 
 /**
@@ -509,17 +515,22 @@ function livePipelines(
 
 /**
  * Imagery renderer: `BandTexture` seed → mask → colour, for 8-bit unsigned
- * samples. Three bands are drawn as RGB and four as RGBA; one band (or the
- * first of two) goes through the photometric interpretation's conversion.
+ * samples. The bands to draw and their colour conversion follow the tags;
+ * see `resolveBandSelection`.
  */
 function createImageryRenderer(
   geotiff: GeoTIFF,
   gl: WebGL2RenderingContext,
+  options: InferRenderPipelineOptions,
 ): GeoTiffRenderer {
   const { colorMap, photometric, samplesPerPixel } = geotiff.cachedTags;
   const { format: textureFormat, nodataSampled } = bandSampling(geotiff, gl);
   const seed = BandTexture[textureFormat.sampler];
-  const channelMap = imageryChannelMap(samplesPerPixel);
+  const { channelMap, color } = resolveImagery({
+    samplesPerPixel,
+    photometric,
+    extraSamples: options.extraSamples ?? null,
+  });
 
   // Palette indices cannot be interpolated — a value halfway between two
   // classes is a third, unrelated class.
@@ -539,7 +550,7 @@ function createImageryRenderer(
   let colormapTexture: WebGLTexture | undefined;
 
   const buildPipeline = (textures: GeoTiffTileTextures): RenderPipeline => {
-    const colorModule = photometricModule();
+    const colorModule = colorConversionModule(color);
     return [
       {
         module: seed,
@@ -585,20 +596,25 @@ function createImageryRenderer(
     },
   };
 
-  function photometricModule(): RenderPipeline[number] | null {
-    if (samplesPerPixel === 3 || samplesPerPixel === 4) {
-      // Always interpret 3- or 4-band images as RGB/RGBA.
-      return null;
-    }
-
-    switch (photometric) {
-      case Photometric.MinIsWhite:
-        return { module: WhiteIsZero };
-      case Photometric.MinIsBlack:
-        return { module: BlackIsZero };
-      case Photometric.Rgb:
+  /**
+   * Built per tile rather than once: the palette's module needs the colormap
+   * texture, which only exists once `prepare` has run.
+   */
+  function colorConversionModule(
+    conversion: ColorConversion,
+  ): RasterModuleInstance | null {
+    switch (conversion) {
+      case "rgb":
         return null;
-      case Photometric.Palette: {
+      case "gray":
+        return { module: BlackIsZero };
+      case "gray-inverted":
+        return { module: WhiteIsZero };
+      case "cmyk":
+        return { module: CMYKToRGB };
+      case "cielab":
+        return { module: CieLabToRGB };
+      case "palette":
         if (!colormapTexture) {
           throw new Error(
             "buildPipeline needs the colormap texture: call prepare(gl) first",
@@ -610,40 +626,11 @@ function createImageryRenderer(
             colormap: { texture: colormapTexture, target: gl.TEXTURE_2D_ARRAY },
           },
         };
-      }
-      // cogeotiff calls CMYK "Separated".
-      case Photometric.Separated:
-        return { module: CMYKToRGB };
-      case Photometric.Ycbcr:
-        // @developmentseed/geotiff decodes JPEG-compressed YCbCr through the
-        // browser's image decoder, which has already converted to RGB.
-        return null;
-      case Photometric.Cielab:
-        return { module: CieLabToRGB };
       default:
-        throw new Error(`Unsupported PhotometricInterpretation ${photometric}`);
+        throw new RangeError(
+          `unknown colour conversion ${JSON.stringify(conversion satisfies never)}`,
+        );
     }
-  }
-}
-
-/**
- * Layer index per output channel `[r, g, b, a]` for the imagery seed, `-1`
- * where no band feeds it: three bands are RGB, four RGBA, and one or two
- * bands draw the first.
- */
-function imageryChannelMap(samplesPerPixel: number): Int32Array {
-  switch (samplesPerPixel) {
-    case 1:
-    case 2:
-      return Int32Array.from([0, -1, -1, -1]);
-    case 3:
-      return Int32Array.from([0, 1, 2, -1]);
-    case 4:
-      return Int32Array.from([0, 1, 2, 3]);
-    default:
-      throw new Error(
-        `Unsupported SamplesPerPixel ${samplesPerPixel}. Only 1, 2, 3 or 4 are supported.`,
-      );
   }
 }
 
