@@ -67,6 +67,11 @@ describe("inferTextureFormat", () => {
       // Linear filtering of float textures needs OES_texture_float_linear.
       filterable: false,
     });
+    expect(inferTextureFormat(gl, 1, [32], UINT)).toMatchObject({
+      internalFormat: "R32UI",
+      type: "UNSIGNED_INT",
+      sampler: "uint",
+    });
   });
 
   it("rejects three-channel input, which must be padded to RGBA first", () => {

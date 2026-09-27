@@ -97,6 +97,15 @@ function formatTable(
       false,
       8,
     ),
+    // 32-bit unsigned: `float(texelFetch(...))` is exact to 2^24.
+    "1:unorm:32": f(
+      gl.R32UI,
+      gl.RED_INTEGER,
+      gl.UNSIGNED_INT,
+      "uint",
+      false,
+      4,
+    ),
 
     // Signed integer.
     "1:sint:8": f(gl.R8I, gl.RED_INTEGER, gl.BYTE, "int", false, 1),

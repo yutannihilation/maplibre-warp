@@ -285,11 +285,14 @@ implies for the shader:
 | --- | --- | --- | --- | --- |
 | 1/2/4 × uint8 | `R8` / `RG8` / `RGBA8` | `sampler2D` | yes | normalised `[0, 1]` |
 | 1/2/4 × uint16 | `R16UI` / `RG16UI` / `RGBA16UI` | `usampler2D` | no | raw integers |
+| 1 × uint32 | `R32UI` | `usampler2D` | no | raw integers² |
 | 1 × int8/16/32 | `R8I` / `R16I` / `R32I` | `isampler2D` | no | raw integers |
 | 1/2/4 × float32 | `R32F` / `RG32F` / `RGBA32F` | `sampler2D` | no¹ | raw floats |
 
 ¹ Linear filtering of float textures needs `OES_texture_float_linear`; the
 table reports it as unavailable and the upload falls back to `NEAREST`.
+
+² The shader converts samples to `float`, which is exact up to 2²⁴.
 
 The imagery path currently accepts only 8-bit unsigned samples and throws for
 the rest. The contour path accepts every row of the table, because it reads
