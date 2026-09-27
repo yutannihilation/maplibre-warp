@@ -103,6 +103,23 @@ export interface GeoTiffTileTextures {
 }
 
 /**
+ * One tile's decoded pixels, ready for upload. The CPU-side half of a tile:
+ * produced between frames by {@link GeoTiffRenderer.loadTilePixels}, turned
+ * into {@link GeoTiffTileTextures} inside MapLibre's GL bracket by
+ * {@link GeoTiffRenderer.uploadTileTextures}.
+ */
+export interface GeoTiffTilePixels {
+  /** One `(width + 2·halo) × (height + 2·halo)` plane per band. */
+  planes: RasterTypedArray[];
+  /** Content size in texels, excluding the halo. */
+  width: number;
+  height: number;
+  halo: number;
+  /** Content-sized validity mask, if the image has one. */
+  mask: Uint8Array | null;
+}
+
+/**
  * Colour configuration for the fill of {@link ContourRenderOptions}, shared
  * by the `"bands"` and `"gradient"` fills.
  */
@@ -329,44 +346,76 @@ export function validateContourOptions(
   resolveContourOptions(contour, samplesPerPixel);
 }
 
+/**
+ * How a GeoTIFF's tiles become GPU textures and a module chain.
+ *
+ * GL is touched only by `prepare`, `uploadTileTextures`, `destroyTileTextures`
+ * and `destroy`. The first two must run inside MapLibre's custom-layer bracket
+ * (`prerender`/`render`): they set pixel-store state and leave textures bound,
+ * and rely on MapLibre's `setDirty()` afterwards. See "GL state" on
+ * `RasterCustomLayer`.
+ */
 export interface GeoTiffRenderer {
-  loadTileTextures(
+  /**
+   * Fetch and decode one tile. Asynchronous and GL-free, so it may finish
+   * between frames.
+   */
+  loadTilePixels(
     image: GeoTIFF | Overview,
     options: {
-      gl: WebGL2RenderingContext;
       x: number;
       y: number;
       signal: AbortSignal;
       pool?: DecoderPool;
     },
-  ): Promise<GeoTiffTileTextures>;
+  ): Promise<GeoTiffTilePixels>;
+  /** Upload decoded pixels. Bracket-only. */
+  uploadTileTextures(
+    gl: WebGL2RenderingContext,
+    pixels: GeoTiffTilePixels,
+  ): GeoTiffTileTextures;
+  /**
+   * The module chain for one tile. Needs the layer-wide textures
+   * {@link prepare} creates, and throws if it has not run yet.
+   */
   buildPipeline(textures: GeoTiffTileTextures): RenderPipeline;
   destroyTileTextures(
     gl: WebGL2RenderingContext,
     textures: GeoTiffTileTextures,
   ): void;
+  /**
+   * Create or replace the layer-wide GPU resources — a palette's colormap,
+   * a contour fill's colour lookup — and apply any change recorded by
+   * {@link updateContour}. Cheap when nothing is pending. Bracket-only; run
+   * it before {@link uploadTileTextures} and {@link buildPipeline} each
+   * frame.
+   *
+   * Throws if a texture cannot be created. The attempted work is consumed
+   * either way, so a failure surfaces once instead of on every frame: a
+   * failed re-style keeps the previous style, and a failed first `prepare`
+   * leaves {@link buildPipeline} throwing until a later
+   * {@link updateContour} is applied successfully.
+   */
+  prepare(gl: WebGL2RenderingContext): void;
   /** Release layer-wide resources such as the colormap texture. */
   destroy(gl: WebGL2RenderingContext): void;
   /**
-   * Re-style contours in place, for every tile already built: any change,
-   * including the `band` to read, the fill mode or lines on and off. Only
-   * the contour renderer has this. Takes options already run through
+   * Re-style contours for every tile already built: any change, including
+   * the `band` to read, the fill mode or lines on and off. Only the contour
+   * renderer has this. Takes options already run through
    * {@link resolveContourOptions} so the caller validates exactly once.
+   *
+   * GL-free: it records the change, which the next {@link prepare} applies.
+   * Until then tiles keep their current, consistent style.
    */
-  updateContour?(
-    gl: WebGL2RenderingContext,
-    contour: ResolvedContourOptions,
-  ): void;
+  updateContour?(contour: ResolvedContourOptions): void;
   /**
    * Re-compose imagery in place, for every tile already built: another band
    * selection, another stretch, or both. Only the imagery renderer has this.
    * Validates against the file's tags and throws a `RangeError` before
-   * touching any tile.
+   * touching any tile. GL-free, and takes effect on the next frame.
    */
-  updateImagery?(
-    gl: WebGL2RenderingContext,
-    imagery: ImageryRenderOptions,
-  ): void;
+  updateImagery?(imagery: ImageryRenderOptions): void;
 }
 
 export interface InferRenderPipelineOptions extends ImageryRenderOptions {
@@ -501,15 +550,19 @@ function createImageryRenderer(
   // Palette indices cannot be interpolated — a value halfway between two
   // classes is a third, unrelated class.
   const isPalette = photometric === Photometric.Palette;
-  let colormapTexture: WebGLTexture | undefined;
+  // Parsed now, so a missing or malformed ColorMap fails while the source is
+  // opening; the texture itself waits for `prepare`, inside MapLibre's GL
+  // bracket, which consumes this.
+  let colormap: ImageData | undefined;
   if (isPalette) {
     if (!colorMap) {
       throw new Error(
         "ColorMap tag is required for PhotometricInterpretation Palette",
       );
     }
-    colormapTexture = createColormapTexture(gl, parseColormap(colorMap));
+    colormap = parseColormap(colorMap);
   }
+  let colormapTexture: WebGLTexture | undefined;
 
   const resolve = (imagery: ImageryRenderOptions): ResolvedImagery =>
     resolveImageryOptions(imagery, {
@@ -521,6 +574,11 @@ function createImageryRenderer(
       denorm,
     });
 
+  /**
+   * The colour module, built per tile rather than held in the style: the
+   * palette's needs the colormap texture, which only exists once `prepare`
+   * has run.
+   */
   const colorModule = (color: ColorConversion): RasterModuleInstance | null => {
     switch (color) {
       case "rgb":
@@ -534,13 +592,15 @@ function createImageryRenderer(
       case "cielab":
         return { module: CieLabToRGB };
       case "palette":
+        if (!colormapTexture) {
+          throw new Error(
+            "buildPipeline needs the colormap texture: call prepare(gl) first",
+          );
+        }
         return {
           module: Colormap,
           props: {
-            colormap: {
-              texture: colormapTexture!,
-              target: gl.TEXTURE_2D_ARRAY,
-            },
+            colormap: { texture: colormapTexture, target: gl.TEXTURE_2D_ARRAY },
           },
         };
       default:
@@ -558,7 +618,7 @@ function createImageryRenderer(
   interface ImageryStyle {
     channelMap: Int32Array;
     rescale: { module: typeof LinearRescale; props: LinearRescaleProps } | null;
-    color: RasterModuleInstance | null;
+    color: ColorConversion;
   }
 
   const createStyle = (resolved: ResolvedImagery): ImageryStyle => ({
@@ -566,44 +626,60 @@ function createImageryRenderer(
     rescale: resolved.rescale
       ? { module: LinearRescale, props: resolved.rescale }
       : null,
-    color: colorModule(resolved.color),
+    color: resolved.color,
   });
 
   let style = createStyle(resolve(options));
 
-  const modulesFor = (textures: GeoTiffTileTextures): RenderPipeline => [
-    {
-      module: seed,
-      props: {
-        texture: { texture: textures.texture, target: gl.TEXTURE_2D_ARRAY },
-        channelMap: style.channelMap,
-        nodata: nodataSampled,
-        alphaMax,
-        nearest: isPalette,
-        size: new Float32Array([textures.width, textures.height]),
-        halo: textures.halo,
+  const modulesFor = (textures: GeoTiffTileTextures): RenderPipeline => {
+    const color = colorModule(style.color);
+    return [
+      {
+        module: seed,
+        props: {
+          texture: { texture: textures.texture, target: gl.TEXTURE_2D_ARRAY },
+          channelMap: style.channelMap,
+          nodata: nodataSampled,
+          alphaMax,
+          nearest: isPalette,
+          size: new Float32Array([textures.width, textures.height]),
+          halo: textures.halo,
+        },
       },
-    },
-    ...maskModule(gl, textures),
-    ...(style.rescale ? [style.rescale] : []),
-    ...(style.color ? [style.color] : []),
-  ];
+      ...maskModule(gl, textures),
+      ...(style.rescale ? [style.rescale] : []),
+      ...(color ? [color] : []),
+    ];
+  };
 
   const pipelines = livePipelines(modulesFor);
   const haloCache = new DecodedTileCache();
 
   return {
-    loadTileTextures: tileTextureLoader({ gl, textureFormat, haloCache }),
+    loadTilePixels: (image, loadOptions) =>
+      fetchTilePixels(image, loadOptions, haloCache),
+    uploadTileTextures: (glContext, pixels) =>
+      uploadTileTextures(glContext, pixels, textureFormat),
     buildPipeline: pipelines.buildPipeline,
     destroyTileTextures: pipelines.destroyTileTextures,
+    prepare: (glContext) => {
+      if (!colormap) {
+        return;
+      }
+      // Consumed before the attempt, so a failure is not retried per frame.
+      const image = colormap;
+      colormap = undefined;
+      colormapTexture = createColormapTexture(glContext, image);
+    },
     destroy: (glContext) => {
       haloCache.clear();
       pipelines.clear();
       if (colormapTexture) {
         glContext.deleteTexture(colormapTexture);
+        colormapTexture = undefined;
       }
     },
-    updateImagery: (_glContext, imagery) => {
+    updateImagery: (imagery) => {
       // Resolves (and so validates) before anything is touched.
       const next = createStyle(resolve(imagery));
       // A slider drives this at input rate. When the module chain keeps its
@@ -611,7 +687,7 @@ function createImageryRenderer(
       // rebuilt: the next frame reads the new values.
       const sameShape =
         (style.rescale === null) === (next.rescale === null) &&
-        style.color?.module.name === next.color?.module.name;
+        style.color === next.color;
       if (sameShape) {
         style.channelMap.set(next.channelMap);
         if (style.rescale && next.rescale) {
@@ -624,18 +700,6 @@ function createImageryRenderer(
       pipelines.rebuild();
     },
   };
-}
-
-/** One tile's decoded pixels, ready for upload. */
-interface TilePlanes {
-  /** One `(width + 2·halo) × (height + 2·halo)` plane per band. */
-  planes: RasterTypedArray[];
-  /** Content size in texels, excluding the halo. */
-  width: number;
-  height: number;
-  halo: number;
-  /** Content-sized validity mask, if the image has one. */
-  mask: Uint8Array | null;
 }
 
 /** A decoded tile as band planes. */
@@ -686,11 +750,11 @@ function plane(tile: PlanarTile, band: number): Stitchable {
  * which clamps that seam the way a tile on the image edge is clamped; only
  * the tile's own failure fails the load.
  */
-async function fetchTilePlanes(
+async function fetchTilePixels(
   image: GeoTIFF | Overview,
-  options: Parameters<GeoTiffRenderer["loadTileTextures"]>[1],
+  options: Parameters<GeoTiffRenderer["loadTilePixels"]>[1],
   haloCache: DecodedTileCache,
-): Promise<TilePlanes> {
+): Promise<GeoTiffTilePixels> {
   const { x: tilesAcross, y: tilesDown } = image.tileCount;
   const neighbours = neighbourCoordinates(
     options.x,
@@ -725,55 +789,43 @@ async function fetchTilePlanes(
 }
 
 /**
- * Fetch and upload one tile's textures: the band planes as a texture array
- * plus the validity mask. Shared by every renderer; only the texture format
- * differs.
+ * The upload half, shared by every renderer; only the texture format
+ * differs. The band planes become a texture array, plus the validity mask.
+ * Bracket-only, like everything in `texture.ts`.
  */
-function tileTextureLoader({
-  gl,
-  textureFormat,
-  haloCache,
-}: {
-  gl: WebGL2RenderingContext;
-  textureFormat: GLTextureFormat;
-  /** Every tile is padded with a halo of neighbour texels fetched through this cache. */
-  haloCache: DecodedTileCache;
-}): GeoTiffRenderer["loadTileTextures"] {
-  const maskFormat = inferTextureFormat(gl, 1, [8], [SampleFormat.Uint]);
-  return async (image, options) => {
-    const { planes, width, height, halo, mask } = await fetchTilePlanes(
-      image,
-      options,
-      haloCache,
-    );
-    const paddedWidth = width + 2 * halo;
-    const paddedHeight = height + 2 * halo;
+function uploadTileTextures(
+  gl: WebGL2RenderingContext,
+  pixels: GeoTiffTilePixels,
+  textureFormat: GLTextureFormat,
+): GeoTiffTileTextures {
+  const { planes, width, height, halo, mask } = pixels;
+  const paddedWidth = width + 2 * halo;
+  const paddedHeight = height + 2 * halo;
 
-    const texture = createTextureArray(options.gl, {
-      width: paddedWidth,
-      height: paddedHeight,
-      planes: planes.map(toGlView),
-      format: textureFormat,
+  const texture = createTextureArray(gl, {
+    width: paddedWidth,
+    height: paddedHeight,
+    planes: planes.map(toGlView),
+    format: textureFormat,
+  });
+  let byteLength =
+    paddedWidth * paddedHeight * planes.length * textureFormat.bytesPerPixel;
+
+  let maskTexture: WebGLTexture | undefined;
+  if (mask !== null) {
+    maskTexture = createTexture2D(gl, {
+      width,
+      height,
+      data: mask,
+      format: inferTextureFormat(gl, 1, [8], [SampleFormat.Uint]),
+      // Nearest, so a mask edge never interpolates into a half-transparent
+      // fringe.
+      linear: false,
     });
-    let byteLength =
-      paddedWidth * paddedHeight * planes.length * textureFormat.bytesPerPixel;
+    byteLength += width * height;
+  }
 
-    let maskTexture: WebGLTexture | undefined;
-    if (mask !== null) {
-      maskTexture = createTexture2D(options.gl, {
-        width,
-        height,
-        data: mask,
-        format: maskFormat,
-        // Nearest, so a mask edge never interpolates into a half-transparent
-        // fringe.
-        linear: false,
-      });
-      byteLength += width * height;
-    }
-
-    return { texture, mask: maskTexture, width, height, halo, byteLength };
-  };
+  return { texture, mask: maskTexture, width, height, halo, byteLength };
 }
 
 /**
@@ -903,25 +955,38 @@ function createContourRenderer(
     }
   };
 
-  let style = createStyle(gl, resolved);
+  /**
+   * The current style — `undefined` until the first `prepare` has created its
+   * textures — and the configuration the next `prepare` applies, initially
+   * the one the renderer was created with.
+   */
+  let style: ContourStyle | undefined;
+  let pending: ResolvedContourOptions | null = resolved;
 
-  const modulesFor = (textures: GeoTiffTileTextures): RenderPipeline => [
-    {
-      module: seed,
-      props: {
-        texture: { texture: textures.texture, target: gl.TEXTURE_2D_ARRAY },
-        band: style.band,
-        nodata: nodataSampled,
-        scale: style.scale,
-        offset: style.offset,
-        size: new Float32Array([textures.width, textures.height]),
-        halo: textures.halo,
+  const modulesFor = (textures: GeoTiffTileTextures): RenderPipeline => {
+    if (!style) {
+      throw new Error(
+        "buildPipeline needs the contour colour textures: call prepare(gl) first",
+      );
+    }
+    return [
+      {
+        module: seed,
+        props: {
+          texture: { texture: textures.texture, target: gl.TEXTURE_2D_ARRAY },
+          band: style.band,
+          nodata: nodataSampled,
+          scale: style.scale,
+          offset: style.offset,
+          size: new Float32Array([textures.width, textures.height]),
+          halo: textures.halo,
+        },
       },
-    },
-    ...maskModule(gl, textures),
-    style.fill,
-    ...(style.lines ? [{ module: ContourLine, props: style.lines }] : []),
-  ];
+      ...maskModule(gl, textures),
+      style.fill,
+      ...(style.lines ? [{ module: ContourLine, props: style.lines }] : []),
+    ];
+  };
 
   const pipelines = livePipelines(modulesFor);
   // Contours interpolate `value` manually, so each tile carries a halo of
@@ -930,21 +995,39 @@ function createContourRenderer(
   const haloCache = new DecodedTileCache();
 
   return {
-    loadTileTextures: tileTextureLoader({ gl, textureFormat, haloCache }),
+    loadTilePixels: (image, options) =>
+      fetchTilePixels(image, options, haloCache),
+    uploadTileTextures: (glContext, pixels) =>
+      uploadTileTextures(glContext, pixels, textureFormat),
     buildPipeline: pipelines.buildPipeline,
     destroyTileTextures: pipelines.destroyTileTextures,
-    destroy: (glContext) => {
-      haloCache.clear();
-      pipelines.clear();
-      destroyStyle(glContext, style);
-    },
-    updateContour: (glContext, next) => {
+    prepare: (glContext) => {
+      if (!pending) {
+        return;
+      }
+      // Consumed before the attempt, so a failure is reported once rather
+      // than rethrown on every frame.
+      const next = pending;
+      pending = null;
       // Create the new textures before deleting the old: if that fails the
       // tiles keep a live texture and consistent (old) props.
       const nextStyle = createStyle(glContext, next);
-      destroyStyle(glContext, style);
+      if (style) {
+        destroyStyle(glContext, style);
+      }
       style = nextStyle;
       pipelines.rebuild();
+    },
+    destroy: (glContext) => {
+      haloCache.clear();
+      pipelines.clear();
+      if (style) {
+        destroyStyle(glContext, style);
+        style = undefined;
+      }
+    },
+    updateContour: (next) => {
+      pending = next;
     },
   };
 }

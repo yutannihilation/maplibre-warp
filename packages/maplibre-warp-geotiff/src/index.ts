@@ -28,6 +28,7 @@ export type {
   ContourLineOptions,
   ContourRenderOptions,
   GeoTiffRenderer,
+  GeoTiffTilePixels,
   GeoTiffTileTextures,
   InferRenderPipelineOptions,
   ResolvedContourOptions,

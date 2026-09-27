@@ -211,79 +211,40 @@ export interface CreateTextureOptions {
 }
 
 /**
- * The pixel-store parameters a texture upload depends on.
- *
- * These are global GL state, and MapLibre caches its own view of them on its
- * `Context` (`PixelStoreUnpackPremultiplyAlpha.set` returns early when the
- * value it is asked for equals the one it last wrote). MapLibre brackets a
- * custom layer's `render()` with `setCustomLayerDefaults()` and `setDirty()`,
- * so state changed *during a draw* is already handled — but tile uploads
- * happen asynchronously between frames, outside that bracket, where nothing
- * resyncs the cache. So these functions leave the parameters exactly as they
- * found them.
- */
-interface PixelStoreState {
-  alignment: number;
-  flipY: boolean;
-  premultiplyAlpha: boolean;
-}
-
-/**
  * Configure pixel storage for a raster upload: tightly packed rows, no row
  * flip, no alpha premultiplication. Raster samples are data, not display-ready
  * colour, and must reach the texture byte-for-byte.
+ *
+ * These are global GL state, and MapLibre caches its own view of them on its
+ * `Context`. The upload functions in this module therefore run only inside
+ * MapLibre's custom-layer bracket — `prerender` or `render` — after which
+ * `context.setDirty()` has MapLibre re-set them before its own next upload.
+ * Nothing is read back or restored here; a `gl.getParameter` round trip
+ * stalls the pipeline. See "GL state" on `RasterCustomLayer`.
  */
-function beginPixelUpload(gl: WebGL2RenderingContext): PixelStoreState {
-  const saved: PixelStoreState = {
-    alignment: gl.getParameter(gl.UNPACK_ALIGNMENT) as number,
-    flipY: gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL) as boolean,
-    premultiplyAlpha: gl.getParameter(
-      gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,
-    ) as boolean,
-  };
+function setPixelStoreForRasterUpload(gl: WebGL2RenderingContext): void {
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-  return saved;
-}
-
-/** Restore what {@link beginPixelUpload} changed. */
-function endPixelUpload(
-  gl: WebGL2RenderingContext,
-  saved: PixelStoreState,
-): void {
-  gl.pixelStorei(gl.UNPACK_ALIGNMENT, saved.alignment);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, saved.flipY);
-  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, saved.premultiplyAlpha);
 }
 
 /**
- * Create a texture and run `upload` with it bound to `target`, with the
- * pixel-store parameters set for raw data and every piece of GL state this
- * touches — the pixel store, the previous binding of `target` and the active
- * unit — restored afterwards. `binding` is the `TEXTURE_BINDING_*` enum that
- * reads back what is bound to `target`.
+ * Create a texture and run `upload` with it bound to `target` on the current
+ * unit and the pixel store set for raw data. Bracket-only, and leaves the
+ * texture bound; see {@link setPixelStoreForRasterUpload}.
  */
 function withTextureUpload(
   gl: WebGL2RenderingContext,
   target: GLenum,
-  binding: GLenum,
   upload: () => void,
 ): WebGLTexture {
   const texture = gl.createTexture();
   if (!texture) {
     throw new Error("Failed to create WebGL texture");
   }
-  const previousUnit = gl.getParameter(gl.ACTIVE_TEXTURE) as GLenum;
-  const previousTexture = gl.getParameter(binding) as WebGLTexture | null;
-  const savedPixelStore = beginPixelUpload(gl);
-
+  setPixelStoreForRasterUpload(gl);
   gl.bindTexture(target, texture);
   upload();
-
-  endPixelUpload(gl, savedPixelStore);
-  gl.bindTexture(target, previousTexture);
-  gl.activeTexture(previousUnit);
   return texture;
 }
 
@@ -303,14 +264,14 @@ function setSamplerParameters(
 }
 
 /**
- * Upload a 2D texture.
+ * Upload a 2D texture. Bracket-only, like {@link withTextureUpload}.
  */
 export function createTexture2D(
   gl: WebGL2RenderingContext,
   options: CreateTextureOptions,
 ): WebGLTexture {
   const { width, height, data, format, linear } = options;
-  return withTextureUpload(gl, gl.TEXTURE_2D, gl.TEXTURE_BINDING_2D, () => {
+  return withTextureUpload(gl, gl.TEXTURE_2D, () => {
     gl.texImage2D(
       gl.TEXTURE_2D,
       0,
@@ -352,7 +313,7 @@ function maxArrayTextureLayers(gl: WebGL2RenderingContext): number {
  * Upload a band stack as a `TEXTURE_2D_ARRAY`: one single-channel layer per
  * plane, so the shader picks bands by layer index and a change of composite
  * touches no texture. Always NEAREST, since the seeds interpolate with
- * `texelFetch` themselves.
+ * `texelFetch` themselves. Bracket-only, like {@link withTextureUpload}.
  */
 export function createTextureArray(
   gl: WebGL2RenderingContext,
@@ -368,41 +329,37 @@ export function createTextureArray(
       `${planes.length} bands exceed MAX_ARRAY_TEXTURE_LAYERS (${maxLayers})`,
     );
   }
-  return withTextureUpload(
-    gl,
-    gl.TEXTURE_2D_ARRAY,
-    gl.TEXTURE_BINDING_2D_ARRAY,
-    () => {
-      gl.texStorage3D(
+  return withTextureUpload(gl, gl.TEXTURE_2D_ARRAY, () => {
+    gl.texStorage3D(
+      gl.TEXTURE_2D_ARRAY,
+      1,
+      format.internalFormat,
+      width,
+      height,
+      planes.length,
+    );
+    planes.forEach((plane, layer) => {
+      gl.texSubImage3D(
         gl.TEXTURE_2D_ARRAY,
-        1,
-        format.internalFormat,
+        0,
+        0,
+        0,
+        layer,
         width,
         height,
-        planes.length,
+        1,
+        format.format,
+        format.type,
+        plane,
       );
-      planes.forEach((plane, layer) => {
-        gl.texSubImage3D(
-          gl.TEXTURE_2D_ARRAY,
-          0,
-          0,
-          0,
-          layer,
-          width,
-          height,
-          1,
-          format.format,
-          format.type,
-          plane,
-        );
-      });
-      setSamplerParameters(gl, gl.TEXTURE_2D_ARRAY, gl.NEAREST);
-    },
-  );
+    });
+    setSamplerParameters(gl, gl.TEXTURE_2D_ARRAY, gl.NEAREST);
+  });
 }
 
 /**
- * Upload a colormap sprite as a single-layer `TEXTURE_2D_ARRAY`.
+ * Upload a colormap sprite as a single-layer `TEXTURE_2D_ARRAY`. Bracket-only,
+ * like {@link withTextureUpload}.
  *
  * An array texture (rather than a plain 2D one) so that multiple colormaps can
  * be packed into one texture later and selected by layer index — the shape the
@@ -412,28 +369,23 @@ export function createColormapTexture(
   gl: WebGL2RenderingContext,
   image: ImageData,
 ): WebGLTexture {
-  return withTextureUpload(
-    gl,
-    gl.TEXTURE_2D_ARRAY,
-    gl.TEXTURE_BINDING_2D_ARRAY,
-    () => {
-      gl.texImage3D(
-        gl.TEXTURE_2D_ARRAY,
-        0,
-        gl.RGBA8,
-        image.width,
-        image.height,
-        1,
-        0,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        new Uint8Array(
-          image.data.buffer,
-          image.data.byteOffset,
-          image.data.byteLength,
-        ),
-      );
-      setSamplerParameters(gl, gl.TEXTURE_2D_ARRAY, gl.NEAREST);
-    },
-  );
+  return withTextureUpload(gl, gl.TEXTURE_2D_ARRAY, () => {
+    gl.texImage3D(
+      gl.TEXTURE_2D_ARRAY,
+      0,
+      gl.RGBA8,
+      image.width,
+      image.height,
+      1,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      new Uint8Array(
+        image.data.buffer,
+        image.data.byteOffset,
+        image.data.byteLength,
+      ),
+    );
+    setSamplerParameters(gl, gl.TEXTURE_2D_ARRAY, gl.NEAREST);
+  });
 }

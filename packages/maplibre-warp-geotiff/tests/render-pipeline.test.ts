@@ -31,8 +31,14 @@ function stubGl(uploads?: Upload[]): WebGL2RenderingContext {
           return () => ({ name: "texture" });
         }
         if (name === "getParameter") {
-          return (pname: string) =>
-            pname === "MAX_ARRAY_TEXTURE_LAYERS" ? 256 : 0;
+          return (pname: string) => {
+            if (pname === "MAX_ARRAY_TEXTURE_LAYERS") {
+              return 256;
+            }
+            throw new Error(
+              "getParameter must not be called: GL state is never read back",
+            );
+          };
         }
         if (uploads && name === "texImage2D") {
           return (
@@ -115,6 +121,18 @@ const moduleNames = (
   pipeline: ReturnType<ReturnType<typeof inferRenderPipeline>["buildPipeline"]>,
 ) => pipeline.map((m) => m.module.name);
 
+/**
+ * A renderer with its layer-wide textures created, as `COGLayer.prerender`
+ * does before any tile is built.
+ */
+function preparedRenderer(
+  ...args: Parameters<typeof inferRenderPipeline>
+): ReturnType<typeof inferRenderPipeline> {
+  const renderer = inferRenderPipeline(...args);
+  renderer.prepare(args[1]);
+  return renderer;
+}
+
 describe("inferRenderPipeline for imagery", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -141,7 +159,7 @@ describe("inferRenderPipeline for imagery", () => {
     };
 
   it("draws NAIP's RGB and leaves its near-infrared band out", () => {
-    const renderer = inferRenderPipeline(naip, stubGl(), {
+    const renderer = preparedRenderer(naip, stubGl(), {
       extraSamples: [0],
     });
     expect(moduleNames(renderer.buildPipeline(textures))).toEqual([
@@ -153,7 +171,7 @@ describe("inferRenderPipeline for imagery", () => {
   });
 
   it("composes a uint16 multispectral file with a stretch", () => {
-    const renderer = inferRenderPipeline(maxar, stubGl(), {
+    const renderer = preparedRenderer(maxar, stubGl(), {
       bands: [4, 2, 1],
       rescale: [0, 2000],
     });
@@ -172,7 +190,7 @@ describe("inferRenderPipeline for imagery", () => {
   });
 
   it("broadcasts a single band to grey, whatever the file's photometric", () => {
-    const renderer = inferRenderPipeline(maxar, stubGl(), {
+    const renderer = preparedRenderer(maxar, stubGl(), {
       bands: [6],
       rescale: [1000, 3600],
     });
@@ -181,7 +199,7 @@ describe("inferRenderPipeline for imagery", () => {
       "linear-rescale",
       "black-is-zero",
     ]);
-    const green = inferRenderPipeline(naip, stubGl(), { bands: [1] });
+    const green = preparedRenderer(naip, stubGl(), { bands: [1] });
     expect(moduleNames(green.buildPipeline(textures))).toEqual([
       "band-texture-float",
       "black-is-zero",
@@ -200,7 +218,7 @@ describe("inferRenderPipeline for imagery", () => {
         ) {}
       },
     );
-    const renderer = inferRenderPipeline(
+    const renderer = preparedRenderer(
       fakeGeoTiff({
         sampleFormat: SampleFormat.Uint,
         bitsPerSample: 8,
@@ -233,14 +251,14 @@ describe("inferRenderPipeline for imagery", () => {
   describe("updateImagery", () => {
     it("re-composes tiles that were built before the change", () => {
       const gl = stubGl();
-      const renderer = inferRenderPipeline(maxar, gl, {
+      const renderer = preparedRenderer(maxar, gl, {
         bands: [4, 2, 1],
         rescale: [0, 2000],
       });
       const built = renderer.buildPipeline(textures);
       const other = renderer.buildPipeline({ ...textures, width: 64 });
 
-      renderer.updateImagery!(gl, { bands: [6], rescale: [1000, 3600] });
+      renderer.updateImagery!({ bands: [6], rescale: [1000, 3600] });
 
       // Same arrays, re-filled: the payloads keep pointing at them.
       expect(moduleNames(built)).toEqual([
@@ -260,7 +278,7 @@ describe("inferRenderPipeline for imagery", () => {
 
     it("updates a same-shaped chain in place, without rebuilding", () => {
       const gl = stubGl();
-      const renderer = inferRenderPipeline(maxar, gl, {
+      const renderer = preparedRenderer(maxar, gl, {
         bands: [4, 2, 1],
         rescale: [0, 2000],
       });
@@ -269,7 +287,7 @@ describe("inferRenderPipeline for imagery", () => {
       const rescaleProps = built[1]!.props;
 
       // A slider drives this at input rate: only the values move.
-      renderer.updateImagery!(gl, { bands: [6, 4, 2], rescale: [0, 900] });
+      renderer.updateImagery!({ bands: [6, 4, 2], rescale: [0, 900] });
       expect(built[0]!.props).toBe(seedProps);
       expect(built[1]!.props).toBe(rescaleProps);
       expect(Array.from(seedProps.channelMap)).toEqual([6, 4, 2, -1]);
@@ -282,15 +300,15 @@ describe("inferRenderPipeline for imagery", () => {
 
     it("validates against the file and leaves tiles alone on failure", () => {
       const gl = stubGl();
-      const renderer = inferRenderPipeline(maxar, gl, {
+      const renderer = preparedRenderer(maxar, gl, {
         bands: [4, 2, 1],
         rescale: [0, 2000],
       });
       const built = renderer.buildPipeline(textures);
       expect(() =>
-        renderer.updateImagery!(gl, { bands: [8], rescale: [0, 1] }),
+        renderer.updateImagery!({ bands: [8], rescale: [0, 1] }),
       ).toThrow(/out of range/);
-      expect(() => renderer.updateImagery!(gl, { bands: [6] })).toThrow(
+      expect(() => renderer.updateImagery!({ bands: [6] })).toThrow(
         /needs `rescale`/,
       );
       expect(Array.from(built[0]!.props.channelMap)).toEqual([4, 2, 1, -1]);
@@ -319,7 +337,7 @@ describe("inferRenderPipeline with contour", () => {
   };
 
   it("builds value → isoband → contour-line for a float32 DEM", () => {
-    const renderer = inferRenderPipeline(
+    const renderer = preparedRenderer(
       fakeGeoTiff({
         sampleFormat: SampleFormat.Float,
         bitsPerSample: 32,
@@ -354,7 +372,7 @@ describe("inferRenderPipeline with contour", () => {
   });
 
   it("builds every tile's props from the same precomputed objects", () => {
-    const renderer = inferRenderPipeline(
+    const renderer = preparedRenderer(
       fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
       stubGl(),
       { contour },
@@ -367,7 +385,7 @@ describe("inferRenderPipeline with contour", () => {
   });
 
   it("picks the integer sampler variants for 16-bit data", () => {
-    const uint = inferRenderPipeline(
+    const uint = preparedRenderer(
       fakeGeoTiff({ sampleFormat: SampleFormat.Uint, bitsPerSample: 16 }),
       stubGl(),
       { contour },
@@ -375,7 +393,7 @@ describe("inferRenderPipeline with contour", () => {
     expect(moduleNames(uint.buildPipeline(textures))[0]).toBe(
       "value-texture-uint",
     );
-    const int = inferRenderPipeline(
+    const int = preparedRenderer(
       fakeGeoTiff({ sampleFormat: SampleFormat.Int, bitsPerSample: 16 }),
       stubGl(),
       { contour },
@@ -386,7 +404,7 @@ describe("inferRenderPipeline with contour", () => {
   });
 
   it("applies GDAL scale/offset and denormalises 8-bit samples", () => {
-    const renderer = inferRenderPipeline(
+    const renderer = preparedRenderer(
       fakeGeoTiff({
         sampleFormat: SampleFormat.Uint,
         bitsPerSample: 8,
@@ -411,14 +429,14 @@ describe("inferRenderPipeline with contour", () => {
       sampleFormat: SampleFormat.Float,
       bitsPerSample: 32,
     });
-    const bandsOnly = inferRenderPipeline(geotiff, stubGl(), {
+    const bandsOnly = preparedRenderer(geotiff, stubGl(), {
       contour: { ...contour, lines: false },
     });
     expect(moduleNames(bandsOnly.buildPipeline(textures))).toEqual([
       "value-texture-float",
       "isoband",
     ]);
-    const linesOnly = inferRenderPipeline(geotiff, stubGl(), {
+    const linesOnly = preparedRenderer(geotiff, stubGl(), {
       contour: { ...contour, fill: "none" },
     });
     expect(moduleNames(linesOnly.buildPipeline(textures))).toEqual([
@@ -429,7 +447,7 @@ describe("inferRenderPipeline with contour", () => {
   });
 
   it("builds value → value-gradient → contour-line for a gradient fill", () => {
-    const renderer = inferRenderPipeline(
+    const renderer = preparedRenderer(
       fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
       stubGl(),
       {
@@ -461,17 +479,17 @@ describe("inferRenderPipeline with contour", () => {
       bitsPerSample: 32,
     });
     expect(() =>
-      inferRenderPipeline(geotiff, stubGl(), {
+      preparedRenderer(geotiff, stubGl(), {
         contour: { thresholds: [1, 2] },
       }),
     ).toThrow(/needs `bands`/);
     expect(() =>
-      inferRenderPipeline(geotiff, stubGl(), {
+      preparedRenderer(geotiff, stubGl(), {
         contour: { thresholds: [1], fill: "gradient", bands: contour.bands },
       }),
     ).toThrow(/at least two/);
     expect(() =>
-      inferRenderPipeline(geotiff, stubGl(), {
+      preparedRenderer(geotiff, stubGl(), {
         contour: {
           thresholds: [1, 2],
           fill: "gradient",
@@ -491,7 +509,7 @@ describe("inferRenderPipeline with contour", () => {
 
   it("rejects a configuration that emits no band", () => {
     expect(() =>
-      inferRenderPipeline(
+      preparedRenderer(
         fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
         stubGl(),
         {
@@ -504,9 +522,18 @@ describe("inferRenderPipeline with contour", () => {
     ).toThrow(RangeError);
   });
 
+  it("refuses to build a tile's pipeline before prepare has created the colour textures", () => {
+    const renderer = inferRenderPipeline(
+      fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
+      stubGl(),
+      { contour },
+    );
+    expect(() => renderer.buildPipeline(textures)).toThrow(/prepare\(gl\)/);
+  });
+
   it("rejects a colour count that does not match the bands", () => {
     expect(() =>
-      inferRenderPipeline(
+      preparedRenderer(
         fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
         stubGl(),
         { contour: { ...contour, bands: { colors: ["#000"] } } },
@@ -522,12 +549,11 @@ describe("inferRenderPipeline with contour", () => {
 
     it("re-styles tiles that were built before the change", () => {
       const gl = stubGl();
-      const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      const renderer = preparedRenderer(geotiff, gl, { contour });
       const built = renderer.buildPipeline(textures);
       const oldColors = (built[1]!.props as { colors: unknown }).colors;
 
       renderer.updateContour!(
-        gl,
         resolveContourOptions({
           thresholds: [10, 20, 30, 40],
           bands: {
@@ -537,6 +563,7 @@ describe("inferRenderPipeline with contour", () => {
           lines: { width: 3, color: "#fff" },
         }),
       );
+      renderer.prepare(gl);
 
       // Same props objects, so the already-built pipeline sees the update…
       expect(built[1]!.props).toMatchObject({
@@ -571,12 +598,16 @@ describe("inferRenderPipeline with contour", () => {
               }
             : target[name as keyof WebGL2RenderingContext],
       });
-      const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      const renderer = preparedRenderer(geotiff, gl, { contour });
       const built = renderer.buildPipeline(textures);
       const other = renderer.buildPipeline({ ...textures, width: 64 });
       const bandTexture = built[1]!.props.colors.texture;
-      const update = (options: Parameters<typeof resolveContourOptions>[0]) =>
-        renderer.updateContour!(gl, resolveContourOptions(options));
+      const update = (
+        options: Parameters<typeof resolveContourOptions>[0],
+      ): void => {
+        renderer.updateContour!(resolveContourOptions(options));
+        renderer.prepare(gl);
+      };
 
       update({ ...contour, fill: "gradient", lines: false });
       // The same arrays, re-filled: the payloads keep pointing at them.
@@ -611,14 +642,14 @@ describe("inferRenderPipeline with contour", () => {
 
     it("stops rebuilding a tile once its textures are destroyed", () => {
       const gl = stubGl();
-      const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      const renderer = preparedRenderer(geotiff, gl, { contour });
       const gone = { ...textures };
       const pipeline = renderer.buildPipeline(gone);
       renderer.destroyTileTextures(gl, gone);
       renderer.updateContour!(
-        gl,
         resolveContourOptions({ ...contour, fill: "none" }),
       );
+      renderer.prepare(gl);
       expect(moduleNames(pipeline)).toEqual([
         "value-texture-float",
         "isoband",
@@ -635,12 +666,12 @@ describe("inferRenderPipeline with contour", () => {
         scales: [1, 1, 1, 1, 1, 1, 0.01, 1],
         offsets: [0, 0, 0, 0, 0, 0, -5, 0],
       });
-      const renderer = inferRenderPipeline(multi, gl, { contour });
+      const renderer = preparedRenderer(multi, gl, { contour });
       const built = renderer.buildPipeline(textures);
       renderer.updateContour!(
-        gl,
         resolveContourOptions({ ...contour, band: 6 }, 8),
       );
+      renderer.prepare(gl);
       // Every band is a layer of the tile's texture array, so the seed just
       // reads another layer.
       expect(built[0]!.props).toMatchObject({
@@ -650,8 +681,112 @@ describe("inferRenderPipeline with contour", () => {
       });
     });
 
+    it("defers the change to prepare, so tiles keep a consistent style until then", () => {
+      const gl = stubGl();
+      const renderer = preparedRenderer(geotiff, gl, { contour });
+      const built = renderer.buildPipeline(textures);
+      renderer.updateContour!(
+        resolveContourOptions({ ...contour, fill: "none" }),
+      );
+      // Recorded, not applied: `setContour` may be called at any time, but
+      // textures are only created inside MapLibre's GL bracket, in `prepare`.
+      const before = ["value-texture-float", "isoband", "contour-line"];
+      expect(moduleNames(built)).toEqual(before);
+      // A tile built meanwhile gets the current style too, not the pending one.
+      expect(moduleNames(renderer.buildPipeline({ ...textures }))).toEqual(
+        before,
+      );
+
+      renderer.prepare(gl);
+      expect(moduleNames(built)).toEqual([
+        "value-texture-float",
+        "clear-color",
+        "contour-line",
+      ]);
+    });
+
+    it("creates textures in prepare only when something is pending", () => {
+      let created = 0;
+      const gl = new Proxy(stubGl(), {
+        get: (target, name: string) =>
+          name === "createTexture"
+            ? () => {
+                created++;
+                return { name: "texture" };
+              }
+            : target[name as keyof WebGL2RenderingContext],
+      });
+      const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      // Nothing at construction: it may run between frames.
+      expect(created).toBe(0);
+      renderer.prepare(gl);
+      expect(created).toBe(1);
+      renderer.prepare(gl);
+      expect(created).toBe(1);
+      renderer.updateContour!(
+        resolveContourOptions({ ...contour, lines: false }),
+      );
+      renderer.prepare(gl);
+      expect(created).toBe(2);
+    });
+
+    /** A stub GL whose `createTexture` fails while `failing.on` is set. */
+    function flakyGl() {
+      const failing = { on: false };
+      const gl = new Proxy(stubGl(), {
+        get: (target, name: string) =>
+          name === "createTexture"
+            ? () => (failing.on ? null : { name: "texture" })
+            : target[name as keyof WebGL2RenderingContext],
+      });
+      return { gl, failing };
+    }
+
+    it("reports a failed re-style once and keeps the previous style", () => {
+      const { gl, failing } = flakyGl();
+      const renderer = preparedRenderer(geotiff, gl, { contour });
+      const built = renderer.buildPipeline(textures);
+      const oldFill = built[1]!.props;
+
+      renderer.updateContour!(
+        resolveContourOptions({ ...contour, lines: false }),
+      );
+      failing.on = true;
+      expect(() => renderer.prepare(gl)).toThrow(/Failed to create/);
+      // Consumed: the next frame's prepare does not throw again.
+      expect(() => renderer.prepare(gl)).not.toThrow();
+      expect(moduleNames(built)).toEqual([
+        "value-texture-float",
+        "isoband",
+        "contour-line",
+      ]);
+      expect(built[1]!.props).toBe(oldFill);
+
+      // A later change still applies once textures can be created again.
+      failing.on = false;
+      renderer.updateContour!(
+        resolveContourOptions({ ...contour, lines: false }),
+      );
+      renderer.prepare(gl);
+      expect(moduleNames(built)).toEqual(["value-texture-float", "isoband"]);
+    });
+
+    it("reports a failed first prepare once and recovers on the next change", () => {
+      const { gl, failing } = flakyGl();
+      const renderer = inferRenderPipeline(geotiff, gl, { contour });
+      failing.on = true;
+      expect(() => renderer.prepare(gl)).toThrow(/Failed to create/);
+      expect(() => renderer.prepare(gl)).not.toThrow();
+      expect(() => renderer.buildPipeline(textures)).toThrow(/prepare\(gl\)/);
+
+      failing.on = false;
+      renderer.updateContour!(resolveContourOptions(contour));
+      renderer.prepare(gl);
+      expect(moduleNames(renderer.buildPipeline(textures))[1]).toBe("isoband");
+    });
+
     it("is absent from the imagery renderer", () => {
-      const renderer = inferRenderPipeline(
+      const renderer = preparedRenderer(
         fakeGeoTiff({ sampleFormat: SampleFormat.Uint, bitsPerSample: 8 }),
         stubGl(),
       );
@@ -660,7 +795,7 @@ describe("inferRenderPipeline with contour", () => {
   });
 
   it("selects the requested band of a multi-band raster", () => {
-    const renderer = inferRenderPipeline(
+    const renderer = preparedRenderer(
       fakeGeoTiff({
         sampleFormat: SampleFormat.Float,
         bitsPerSample: 32,
@@ -789,6 +924,22 @@ describe("contour tile loading", () => {
     return { gl: stubGl(uploads), uploads };
   }
 
+  /** Decode, then upload — the two halves the loader and `prerender` run. */
+  async function loadTile(
+    renderer: ReturnType<typeof inferRenderPipeline>,
+    gl: WebGL2RenderingContext,
+    image: GeoTIFF,
+    x: number,
+    y: number,
+  ) {
+    const pixels = await renderer.loadTilePixels(image, {
+      x,
+      y,
+      signal: new AbortController().signal,
+    });
+    return renderer.uploadTileTextures(gl, pixels);
+  }
+
   /**
    * A 2 × 2-tile image of 2 × 2-pixel float tiles, each filled with 10·x + y.
    * Tiles listed in `failing` are missing, as a sparse COG's would be.
@@ -834,15 +985,10 @@ describe("contour tile loading", () => {
       bitsPerSample: 32,
     });
     const { gl, uploads } = recordingGl();
-    const renderer = inferRenderPipeline(geotiff, gl, { contour });
+    const renderer = preparedRenderer(geotiff, gl, { contour });
     const { image, fetchTiles } = fakeImage();
 
-    const tile = await renderer.loadTileTextures(image, {
-      gl,
-      x: 0,
-      y: 0,
-      signal: new AbortController().signal,
-    });
+    const tile = await loadTile(renderer, gl, image, 0, 0);
 
     // Content size is reported; the texture itself is padded.
     expect(tile).toMatchObject({ width: 2, height: 2, halo: 1 });
@@ -876,11 +1022,11 @@ describe("contour tile loading", () => {
       bitsPerSample: 32,
     });
     const { gl } = recordingGl();
-    const renderer = inferRenderPipeline(geotiff, gl, { contour });
+    const renderer = preparedRenderer(geotiff, gl, { contour });
     const { image, fetchTiles } = fakeImage();
     const signal = new AbortController().signal;
-    await renderer.loadTileTextures(image, { gl, x: 0, y: 0, signal });
-    await renderer.loadTileTextures(image, { gl, x: 1, y: 0, signal });
+    await renderer.loadTilePixels(image, { x: 0, y: 0, signal });
+    await renderer.loadTilePixels(image, { x: 1, y: 0, signal });
     // Every tile of the 2 × 2 image was already fetched for the first one.
     expect(fetchTiles).toHaveBeenCalledTimes(1);
   });
@@ -922,9 +1068,8 @@ describe("contour tile loading", () => {
       tileCount: { x: 2, y: 1 },
       fetchTiles,
     } as unknown as GeoTIFF;
-    const signal = new AbortController().signal;
-    await renderer.loadTileTextures(image, { gl, x: 0, y: 0, signal });
-    await renderer.loadTileTextures(image, { gl, x: 1, y: 0, signal });
+    await loadTile(renderer, gl, image, 0, 0);
+    await loadTile(renderer, gl, image, 1, 0);
     // Two tiles × two layers, each layer that band's plane.
     expect(uploads.map((u) => u.layer)).toEqual([0, 1, 0, 1]);
     expect(Array.from(uploads[1]!.data as Uint16Array)).toEqual(
@@ -941,14 +1086,9 @@ describe("contour tile loading", () => {
       bitsPerSample: 32,
     });
     const { gl, uploads } = recordingGl();
-    const renderer = inferRenderPipeline(geotiff, gl, { contour });
+    const renderer = preparedRenderer(geotiff, gl, { contour });
     const { image } = fakeImage(false, [[1, 0]]);
-    const tile = await renderer.loadTileTextures(image, {
-      gl,
-      x: 0,
-      y: 0,
-      signal: new AbortController().signal,
-    });
+    const tile = await loadTile(renderer, gl, image, 0, 0);
     expect(tile).toMatchObject({ width: 2, height: 2, halo: 1 });
     // Right column clamps to the centre (0) where (1,0) would have been 10;
     // the bottom row still comes from (0,1) and the corner from (1,1).
@@ -963,11 +1103,10 @@ describe("contour tile loading", () => {
       bitsPerSample: 32,
     });
     const { gl } = recordingGl();
-    const renderer = inferRenderPipeline(geotiff, gl, { contour });
+    const renderer = preparedRenderer(geotiff, gl, { contour });
     const { image } = fakeImage(false, [[0, 0]]);
     await expect(
-      renderer.loadTileTextures(image, {
-        gl,
+      renderer.loadTilePixels(image, {
         x: 0,
         y: 0,
         signal: new AbortController().signal,
@@ -981,14 +1120,9 @@ describe("contour tile loading", () => {
       bitsPerSample: 32,
     });
     const { gl, uploads } = recordingGl();
-    const renderer = inferRenderPipeline(geotiff, gl, { contour });
+    const renderer = preparedRenderer(geotiff, gl, { contour });
     const { image } = fakeImage(true);
-    const tile = await renderer.loadTileTextures(image, {
-      gl,
-      x: 1,
-      y: 1,
-      signal: new AbortController().signal,
-    });
+    const tile = await loadTile(renderer, gl, image, 1, 1);
     expect(tile.mask).toBeDefined();
     expect(uploads.map((u) => [u.width, u.height])).toEqual([
       [4, 4],
@@ -1005,7 +1139,7 @@ describe("contour tile loading", () => {
       photometric: Photometric.Rgb,
     });
     const { gl, uploads } = recordingGl();
-    const renderer = inferRenderPipeline(geotiff, gl);
+    const renderer = preparedRenderer(geotiff, gl);
     // A 1 × 1-tile image, decoded band-separate (PlanarConfiguration = 2).
     const fetchTiles = vi.fn(async (xy: Array<[number, number]>) =>
       xy.map(([x, y]) => ({
@@ -1025,9 +1159,12 @@ describe("contour tile loading", () => {
         },
       })),
     );
-    const tile = await renderer.loadTileTextures(
+    const tile = await loadTile(
+      renderer,
+      gl,
       { tileCount: { x: 1, y: 1 }, fetchTiles } as unknown as GeoTIFF,
-      { gl, x: 0, y: 0, signal: new AbortController().signal },
+      0,
+      0,
     );
     expect(tile).toMatchObject({ width: 2, height: 2, halo: 1 });
     expect(uploads.map((u) => [u.layer, u.width, u.height])).toEqual([
