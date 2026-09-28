@@ -292,7 +292,6 @@ describe("resolveImageryOptions", () => {
       { bands: [4, 2, 1], rescale: [0, 2000] },
       maxar,
     );
-    expect(resolved.selection).toEqual([4, 2, 1]);
     expect(Array.from(resolved.channelMap)).toEqual([4, 2, 1, -1]);
     expect(Array.from(resolved.rescale!.max)).toEqual([2000, 2000, 2000]);
     expect(resolved.color).toBe("rgb");

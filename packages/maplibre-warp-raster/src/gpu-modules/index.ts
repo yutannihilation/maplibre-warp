@@ -11,51 +11,6 @@
 
 import type { RasterShaderModule, TextureBinding } from "../shader/module.js";
 
-/** Props for {@link CreateTexture}. */
-export interface CreateTextureProps {
-  /** The input image texture to sample. */
-  texture: TextureBinding;
-}
-
-/**
- * Seeds `color` from a single normalised (`*unorm`) input texture. The first
- * module of most pipelines.
- */
-export const CreateTexture: RasterShaderModule<CreateTextureProps> = {
-  name: "create-texture-unorm",
-  fsDecl: "uniform sampler2D u_texture;",
-  fsColor: "  color = texture(u_texture, uv);",
-  getUniforms: (props) => ({ textures: { u_texture: props.texture } }),
-};
-
-/** Props for {@link FilterNoDataVal}. */
-export interface FilterNoDataValProps {
-  /**
-   * The sentinel nodata value, in the same units as `color.r` after any
-   * earlier pipeline modules. For a `*unorm` texture that means the raw nodata
-   * value divided by the type's maximum.
-   */
-  value: number;
-}
-
-/**
- * Discards fragments whose red channel exactly equals the nodata value.
- *
- * Exact comparison means this only works on values that survive sampling
- * unchanged. With linear filtering, texels near a nodata boundary interpolate
- * to something that is no longer equal to the sentinel, leaving a one-texel
- * halo of blended data around nodata regions. Nearest filtering, or a separate
- * mask texture, avoids that.
- */
-export const FilterNoDataVal: RasterShaderModule<FilterNoDataValProps> = {
-  name: "filter-nodata",
-  fsDecl: "uniform float u_nodata_value;",
-  fsColor: `  if (color.r == u_nodata_value) {
-    discard;
-  }`,
-  getUniforms: (props) => ({ uniforms: { u_nodata_value: props.value } }),
-};
-
 /** Props for {@link MaskTexture}. */
 export interface MaskTextureProps {
   /** Single-channel mask texture; pixels reading 0 are discarded. */

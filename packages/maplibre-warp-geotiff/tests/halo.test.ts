@@ -8,23 +8,20 @@ import {
   stitchHalo,
 } from "../src/halo.js";
 
-/** A `w × h` single-band tile filled with `fill(col, row)`. */
+/** A `w × h` plane filled with `fill(col, row)`. */
 function tile(
   w: number,
   h: number,
   fill: (col: number, row: number) => number,
-  count = 1,
   mask: Uint8Array | null = null,
 ) {
-  const data = new Float32Array(w * h * count);
+  const data = new Float32Array(w * h);
   for (let row = 0; row < h; row++) {
     for (let col = 0; col < w; col++) {
-      for (let b = 0; b < count; b++) {
-        data[(row * w + col) * count + b] = fill(col, row) + b * 1000;
-      }
+      data[row * w + col] = fill(col, row);
     }
   }
-  return { width: w, height: h, count, data, mask };
+  return { width: w, height: h, data, mask };
 }
 
 /** Neighbours as a {@link neighbourIndex}-addressed grid. */
@@ -173,16 +170,6 @@ describe("stitchHalo", () => {
     expect(texel(out, pw, 2, 0)).toBe(9);
   });
 
-  it("keeps every band of a multi-band tile", () => {
-    const centre = tile(1, 1, () => 5, 3);
-    const neighbours = grid([[[1, 0], tile(1, 1, () => 6, 3)]]);
-    const out = stitchHalo(centre, neighbours);
-    // Row 1: [left clamp | centre | right neighbour], 3 samples each.
-    expect(Array.from(out.subarray(3 * 3, 3 * 6))).toEqual([
-      5, 1005, 2005, 5, 1005, 2005, 6, 1006, 2006,
-    ]);
-  });
-
   it("clamps instead of copying a neighbour texel its mask marks missing", () => {
     // Right neighbour: first column is [valid 20, masked 99]; the masked
     // texel must not reach the halo, the centre's own edge (2) stands in.
@@ -191,13 +178,12 @@ describe("stitchHalo", () => {
       2,
       2,
       (c, r) => (r === 0 ? 20 : 99) + c,
-      1,
       new Uint8Array([255, 255, 0, 255]),
     );
     // Diagonal neighbour whose corner texel is masked: the corner falls back
     // to the padded texel in the same row, i.e. the clamped 4. The top-right
     // corner has no diagonal at all and clamps in y to the right neighbour.
-    const diag = tile(2, 2, () => 77, 1, new Uint8Array([0, 255, 255, 255]));
+    const diag = tile(2, 2, () => 77, new Uint8Array([0, 255, 255, 255]));
     const out = stitchHalo(
       centre,
       grid([
@@ -226,8 +212,5 @@ describe("stitchHalo", () => {
     expect(() =>
       stitchHalo(centre, grid([[[0, 1], tile(3, 2, () => 0)]])),
     ).toThrow(/wide/);
-    expect(() =>
-      stitchHalo(centre, grid([[[1, 1], tile(2, 2, () => 0, 2)]])),
-    ).toThrow(/bands/);
   });
 });

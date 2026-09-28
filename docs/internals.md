@@ -312,8 +312,8 @@ becomes its own layer of an array texture (section 2.5):
 
 ¹ The shader converts every sample to `float`, which is exact up to 2²⁴.
 
-`inferTextureFormat` also knows two- and four-channel formats, for other
-textures: the contour colour lookups are `RGBA8`. Integer formats cannot be
+`inferTextureFormat` has one more row, `RGBA8`, for the contour colour
+lookups. Integer formats cannot be
 `LINEAR`-filtered and float32 needs `OES_texture_float_linear`, so rather than
 depend on the hardware for some types and not others, the seeds read texels
 with `texelFetch` and interpolate themselves. Every row therefore works for

@@ -247,9 +247,8 @@ function checkRescaleFits(pairs: RescalePair[], selectedCount: number): void {
   }
 }
 
-export interface RescaleTags {
-  /** Bands in the selection, so a per-channel rescale can be checked. */
-  selectedCount: number;
+/** The sample type, and how its texture samples relate to raw units. */
+export interface SampleTags {
   bitsPerSample: number;
   sampleFormat: SampleFormat;
   /**
@@ -258,6 +257,11 @@ export interface RescaleTags {
    * units, so it is divided by this.
    */
   denorm: number;
+}
+
+export interface RescaleTags extends SampleTags {
+  /** Bands in the selection, so a per-channel rescale can be checked. */
+  selectedCount: number;
 }
 
 /**
@@ -372,18 +376,12 @@ function colorConversion(
 
 /** Everything the imagery seed and its follow-up modules need from the options. */
 export interface ResolvedImagery {
-  selection: number[];
   channelMap: Int32Array;
   rescale: ResolvedRescale | null;
   color: ColorConversion;
 }
 
-export interface ImageryTags extends BandSelectionTags {
-  bitsPerSample: number;
-  sampleFormat: SampleFormat;
-  /** See {@link RescaleTags.denorm}. */
-  denorm: number;
-}
+export interface ImageryTags extends BandSelectionTags, SampleTags {}
 
 /** Resolve and validate the imagery options in one pass. */
 export function resolveImageryOptions(
@@ -392,13 +390,10 @@ export function resolveImageryOptions(
 ): ResolvedImagery {
   const selection = resolveBandSelection(tags, options.bands);
   return {
-    selection,
     channelMap: channelMap(selection),
     rescale: resolveRescale(options.rescale, {
+      ...tags,
       selectedCount: selection.length,
-      bitsPerSample: tags.bitsPerSample,
-      sampleFormat: tags.sampleFormat,
-      denorm: tags.denorm,
     }),
     color: colorConversion(tags.photometric, selection.length),
   };

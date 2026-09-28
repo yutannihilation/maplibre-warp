@@ -6,7 +6,6 @@ import {
   inferRenderPipeline,
   resolveContourBands,
   resolveContourOptions,
-  validateContourOptions,
 } from "../src/render-pipeline.js";
 
 /** A texture upload seen by {@link stubGl}: a 2D image, or one array layer. */
@@ -258,7 +257,7 @@ describe("inferRenderPipeline for imagery", () => {
       const built = renderer.buildPipeline(textures);
       const other = renderer.buildPipeline({ ...textures, width: 64 });
 
-      renderer.updateImagery!({ bands: [6], rescale: [1000, 3600] });
+      renderer.updateImagery({ bands: [6], rescale: [1000, 3600] });
 
       // Same arrays, re-filled: the payloads keep pointing at them.
       expect(moduleNames(built)).toEqual([
@@ -287,7 +286,7 @@ describe("inferRenderPipeline for imagery", () => {
       const rescaleProps = built[1]!.props;
 
       // A slider drives this at input rate: only the values move.
-      renderer.updateImagery!({ bands: [6, 4, 2], rescale: [0, 900] });
+      renderer.updateImagery({ bands: [6, 4, 2], rescale: [0, 900] });
       expect(built[0]!.props).toBe(seedProps);
       expect(built[1]!.props).toBe(rescaleProps);
       expect(Array.from(seedProps.channelMap)).toEqual([6, 4, 2, -1]);
@@ -306,9 +305,9 @@ describe("inferRenderPipeline for imagery", () => {
       });
       const built = renderer.buildPipeline(textures);
       expect(() =>
-        renderer.updateImagery!({ bands: [8], rescale: [0, 1] }),
+        renderer.updateImagery({ bands: [8], rescale: [0, 1] }),
       ).toThrow(/out of range/);
-      expect(() => renderer.updateImagery!({ bands: [6] })).toThrow(
+      expect(() => renderer.updateImagery({ bands: [6] })).toThrow(
         /needs `rescale`/,
       );
       expect(Array.from(built[0]!.props.channelMap)).toEqual([4, 2, 1, -1]);
@@ -318,13 +317,13 @@ describe("inferRenderPipeline for imagery", () => {
       ]);
     });
 
-    it("is absent from the contour renderer", () => {
+    it("is refused by the contour renderer", () => {
       const renderer = inferRenderPipeline(
         fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
         stubGl(),
         { contour: { thresholds: [1], fill: "none" } },
       );
-      expect(renderer.updateImagery).toBeUndefined();
+      expect(() => renderer.updateImagery({ bands: [0] })).toThrow(RangeError);
     });
   });
 
@@ -712,7 +711,7 @@ describe("inferRenderPipeline with contour", () => {
       const built = renderer.buildPipeline(textures);
       const oldColors = (built[1]!.props as { colors: unknown }).colors;
 
-      renderer.updateContour!(
+      renderer.updateContour(
         resolveContourOptions({
           thresholds: [10, 20, 30, 40],
           bands: {
@@ -764,7 +763,7 @@ describe("inferRenderPipeline with contour", () => {
       const update = (
         options: Parameters<typeof resolveContourOptions>[0],
       ): void => {
-        renderer.updateContour!(resolveContourOptions(options));
+        renderer.updateContour(resolveContourOptions(options));
         renderer.prepare(gl);
       };
 
@@ -805,7 +804,7 @@ describe("inferRenderPipeline with contour", () => {
       const gone = { ...textures };
       const pipeline = renderer.buildPipeline(gone);
       renderer.destroyTileTextures(gl, gone);
-      renderer.updateContour!(
+      renderer.updateContour(
         resolveContourOptions({ ...contour, fill: "none" }),
       );
       renderer.prepare(gl);
@@ -827,9 +826,7 @@ describe("inferRenderPipeline with contour", () => {
       });
       const renderer = preparedRenderer(multi, gl, { contour });
       const built = renderer.buildPipeline(textures);
-      renderer.updateContour!(
-        resolveContourOptions({ ...contour, band: 6 }, 8),
-      );
+      renderer.updateContour(resolveContourOptions({ ...contour, band: 6 }, 8));
       renderer.prepare(gl);
       // Every band is a layer of the tile's texture array, so the seed just
       // reads another layer.
@@ -844,7 +841,7 @@ describe("inferRenderPipeline with contour", () => {
       const gl = stubGl();
       const renderer = preparedRenderer(geotiff, gl, { contour });
       const built = renderer.buildPipeline(textures);
-      renderer.updateContour!(
+      renderer.updateContour(
         resolveContourOptions({ ...contour, fill: "none" }),
       );
       // Recorded, not applied: `setContour` may be called at any time, but
@@ -882,7 +879,7 @@ describe("inferRenderPipeline with contour", () => {
       expect(created).toBe(1);
       renderer.prepare(gl);
       expect(created).toBe(1);
-      renderer.updateContour!(
+      renderer.updateContour(
         resolveContourOptions({ ...contour, lines: false }),
       );
       renderer.prepare(gl);
@@ -907,7 +904,7 @@ describe("inferRenderPipeline with contour", () => {
       const built = renderer.buildPipeline(textures);
       const oldFill = built[1]!.props;
 
-      renderer.updateContour!(
+      renderer.updateContour(
         resolveContourOptions({ ...contour, lines: false }),
       );
       failing.on = true;
@@ -923,7 +920,7 @@ describe("inferRenderPipeline with contour", () => {
 
       // A later change still applies once textures can be created again.
       failing.on = false;
-      renderer.updateContour!(
+      renderer.updateContour(
         resolveContourOptions({ ...contour, lines: false }),
       );
       renderer.prepare(gl);
@@ -939,17 +936,21 @@ describe("inferRenderPipeline with contour", () => {
       expect(() => renderer.buildPipeline(textures)).toThrow(/prepare\(gl\)/);
 
       failing.on = false;
-      renderer.updateContour!(resolveContourOptions(contour));
+      renderer.updateContour(resolveContourOptions(contour));
       renderer.prepare(gl);
       expect(moduleNames(renderer.buildPipeline(textures))[1]).toBe("isoband");
     });
 
-    it("is absent from the imagery renderer", () => {
+    it("is refused by the imagery renderer", () => {
       const renderer = preparedRenderer(
         fakeGeoTiff({ sampleFormat: SampleFormat.Uint, bitsPerSample: 8 }),
         stubGl(),
       );
-      expect(renderer.updateContour).toBeUndefined();
+      expect(() =>
+        renderer.updateContour(
+          resolveContourOptions({ thresholds: [1], fill: "none" }),
+        ),
+      ).toThrow(RangeError);
     });
   });
 
@@ -971,75 +972,75 @@ describe("inferRenderPipeline with contour", () => {
   });
 });
 
-describe("validateContourOptions", () => {
+describe("resolveContourOptions validation", () => {
   const base = { thresholds: [1, 2], bands: { colors: ["#000", "#fff"] } };
 
   it("accepts a valid configuration", () => {
-    expect(() => validateContourOptions(base)).not.toThrow();
+    expect(() => resolveContourOptions(base)).not.toThrow();
     expect(() =>
-      validateContourOptions({ thresholds: [1], fill: "none" }),
+      resolveContourOptions({ thresholds: [1], fill: "none" }),
     ).not.toThrow();
     expect(() =>
-      validateContourOptions({ ...base, fill: "gradient" }),
+      resolveContourOptions({ ...base, fill: "gradient" }),
     ).not.toThrow();
   });
 
   it("rejects every configuration error before any I/O", () => {
     expect(() =>
-      validateContourOptions({ ...base, thresholds: [2, 1] }),
+      resolveContourOptions({ ...base, thresholds: [2, 1] }),
     ).toThrow(RangeError);
     expect(() =>
-      validateContourOptions({
+      resolveContourOptions({
         ...base,
         thresholds: Array.from({ length: 65 }, (_, i) => i),
       }),
     ).toThrow(RangeError);
     expect(() =>
-      validateContourOptions({ ...base, bands: { colors: ["red", "#fff"] } }),
+      resolveContourOptions({ ...base, bands: { colors: ["red", "#fff"] } }),
     ).toThrow(RangeError);
     expect(() =>
-      validateContourOptions({ ...base, bands: { colors: ["#000"] } }),
+      resolveContourOptions({ ...base, bands: { colors: ["#000"] } }),
     ).toThrow(RangeError);
     expect(() =>
-      validateContourOptions({ ...base, lines: { color: "blue" } }),
+      resolveContourOptions({ ...base, lines: { color: "blue" } }),
     ).toThrow(RangeError);
     expect(() =>
-      validateContourOptions({
+      resolveContourOptions({
         ...base,
         lines: { majorColor: "hsl(0 0% 0%)" },
       }),
     ).toThrow(RangeError);
     expect(() =>
-      validateContourOptions({ thresholds: [1], fill: "none", lines: false }),
+      resolveContourOptions({ thresholds: [1], fill: "none", lines: false }),
     ).toThrow(RangeError);
     expect(() =>
-      validateContourOptions({
+      resolveContourOptions({
         ...base,
         fill: "solid" as unknown as "bands",
       }),
     ).toThrow(RangeError);
     expect(() =>
-      validateContourOptions({
+      resolveContourOptions({
         thresholds: [1],
         bands: { colors: [], includeUpper: false },
       }),
     ).toThrow(RangeError);
-    expect(() => validateContourOptions({ ...base, band: -1 })).toThrow(
+    expect(() => resolveContourOptions({ ...base, band: -1 })).toThrow(
       RangeError,
     );
-    expect(() => validateContourOptions({ ...base, band: 1.5 })).toThrow(
+    expect(() => resolveContourOptions({ ...base, band: 1.5 })).toThrow(
       RangeError,
     );
     expect(() =>
-      validateContourOptions({ ...base, lines: { width: -1 } }),
+      resolveContourOptions({ ...base, lines: { width: -1 } }),
     ).toThrow(RangeError);
   });
 
   it("checks the band index against the sample count when known", () => {
-    expect(() => validateContourOptions({ ...base, band: 2 }, 2)).toThrow(
+    expect(() => resolveContourOptions({ ...base, band: 2 }, 2)).toThrow(
       RangeError,
     );
-    expect(() => validateContourOptions({ ...base, band: 1 }, 2)).not.toThrow();
+    expect(() => resolveContourOptions({ ...base, band: 1 }, 2)).not.toThrow();
   });
 });
 

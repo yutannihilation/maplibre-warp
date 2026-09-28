@@ -37,7 +37,6 @@ export {
   inferRenderPipeline,
   resolveContourBands,
   resolveContourOptions,
-  validateContourOptions,
 } from "./render-pipeline.js";
 export type {
   CreateTextureArrayOptions,
