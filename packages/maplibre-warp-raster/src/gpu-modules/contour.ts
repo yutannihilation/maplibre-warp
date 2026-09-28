@@ -11,17 +11,18 @@ import type { RasterShaderModule, TextureBinding } from "../shader/module.js";
 import { validateThresholds } from "./contour-bands.js";
 import type { ValueSamplerKind } from "./texture-sampling.js";
 import {
+  ARRAY_SAMPLER_TYPE,
   BILINEAR_SAMPLE_GLSL,
   BILINEAR_TAPS_GLSL,
-  SAMPLER_TYPE,
 } from "./texture-sampling.js";
 
 /** Size of the threshold uniform array, and so the most levels per layer. */
 export const MAX_THRESHOLDS = 64;
 
 export interface ValueTextureProps {
+  /** A `TEXTURE_2D_ARRAY` with one single-channel layer per band. */
   texture: TextureBinding;
-  /** Channel to read, 0–3. */
+  /** Layer (band) to read. */
   band: number;
   /** Sentinel that marks missing data, in raw texel units. */
   nodata: number | null;
@@ -47,12 +48,11 @@ export interface ValueTextureProps {
 function valueTextureModule(
   kind: ValueSamplerKind,
 ): RasterShaderModule<ValueTextureProps> {
-  const sampler = SAMPLER_TYPE[kind];
-  // Integer samplers have no default precision in GLSL ES 3.00.
-  const precision = kind === "float" ? "" : `precision highp ${sampler};\n`;
+  const sampler = ARRAY_SAMPLER_TYPE[kind];
   return {
     name: `value-texture-${kind}`,
-    fsDecl: `${precision}uniform ${sampler} u_value_texture;
+    fsDecl: `precision highp ${sampler};
+uniform ${sampler} u_value_texture;
 uniform int u_value_band;
 uniform int u_value_has_nodata;
 uniform float u_value_nodata;
@@ -61,8 +61,9 @@ uniform float u_value_offset;
 uniform vec2 u_value_size;
 uniform int u_value_halo;
 
-${BILINEAR_SAMPLE_GLSL("u_value")}`,
-    // See `texture-sampling.ts` for why the interpolation is manual.
+${BILINEAR_SAMPLE_GLSL("u_value", "false")}`,
+    // The band is a layer of the array; see `texture-sampling.ts` for why the
+    // interpolation is manual.
     fsColor: `  {
 ${BILINEAR_TAPS_GLSL("u_value")}
     bool invalid = false;
@@ -72,8 +73,10 @@ ${BILINEAR_TAPS_GLSL("u_value")}
     color = vec4(value, 0.0, 0.0, valid);
   }`,
     getUniforms: (props) => {
-      if (!Number.isInteger(props.band) || props.band < 0 || props.band > 3) {
-        throw new RangeError(`band must be 0–3, got ${props.band}`);
+      if (!Number.isInteger(props.band) || props.band < 0) {
+        throw new RangeError(
+          `band must be a non-negative integer, got ${props.band}`,
+        );
       }
       const halo = props.halo ?? 0;
       if (halo !== 0 && halo !== 1) {
@@ -95,7 +98,7 @@ ${BILINEAR_TAPS_GLSL("u_value")}
   };
 }
 
-/** Seeds `value`/`valid` from a single-value texture; one variant per sampler kind. */
+/** Seeds `value`/`valid` from one layer of a band array texture; one variant per sampler kind. */
 export const ValueTexture: Record<
   ValueSamplerKind,
   RasterShaderModule<ValueTextureProps>

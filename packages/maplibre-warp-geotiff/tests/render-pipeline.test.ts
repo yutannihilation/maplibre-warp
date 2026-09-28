@@ -1,6 +1,6 @@
 import { Photometric, SampleFormat } from "@cogeotiff/core";
 import type { GeoTIFF } from "@developmentseed/geotiff";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GeoTiffTileTextures } from "../src/render-pipeline.js";
 import {
   inferRenderPipeline,
@@ -9,16 +9,18 @@ import {
   validateContourOptions,
 } from "../src/render-pipeline.js";
 
-/** A texImage2D upload seen by {@link stubGl}. */
+/** A texture upload seen by {@link stubGl}: a 2D image, or one array layer. */
 interface Upload {
   width: number;
   height: number;
+  /** Set for array layers (`texSubImage3D`). */
+  layer?: number;
   data: unknown;
 }
 
 /**
  * A GL stub: constants read back as their names, calls are no-ops. Pass
- * `uploads` to record every texImage2D call.
+ * `uploads` to record every texImage2D / texSubImage3D call.
  */
 function stubGl(uploads?: Upload[]): WebGL2RenderingContext {
   return new Proxy(
@@ -29,7 +31,10 @@ function stubGl(uploads?: Upload[]): WebGL2RenderingContext {
           return () => ({ name: "texture" });
         }
         if (name === "getParameter") {
-          return () => {
+          return (pname: string) => {
+            if (pname === "MAX_ARRAY_TEXTURE_LAYERS") {
+              return 256;
+            }
             throw new Error(
               "getParameter must not be called: GL state is never read back",
             );
@@ -50,6 +55,23 @@ function stubGl(uploads?: Upload[]): WebGL2RenderingContext {
             uploads.push({ width, height, data });
           };
         }
+        if (uploads && name === "texSubImage3D") {
+          return (
+            _t: unknown,
+            _l: unknown,
+            _x: unknown,
+            _y: unknown,
+            layer: number,
+            width: number,
+            height: number,
+            _d: unknown,
+            _f: unknown,
+            _ty: unknown,
+            data: unknown,
+          ) => {
+            uploads.push({ width, height, layer, data });
+          };
+        }
         if (/^[a-z]/.test(name)) {
           return () => {};
         }
@@ -63,6 +85,8 @@ function fakeGeoTiff(tags: {
   sampleFormat: SampleFormat;
   bitsPerSample: number;
   samplesPerPixel?: number;
+  photometric?: Photometric;
+  colorMap?: Uint16Array;
   nodata?: number | null;
   scales?: number[];
   offsets?: number[];
@@ -75,8 +99,8 @@ function fakeGeoTiff(tags: {
         Array(samplesPerPixel).fill(tags.bitsPerSample),
       ),
       samplesPerPixel,
-      photometric: Photometric.MinIsBlack,
-      colorMap: undefined,
+      photometric: tags.photometric ?? Photometric.MinIsBlack,
+      colorMap: tags.colorMap,
       nodata: tags.nodata ?? null,
     },
     count: samplesPerPixel,
@@ -109,14 +133,124 @@ function preparedRenderer(
   return renderer;
 }
 
-describe("inferRenderPipeline without contour", () => {
-  it("still rejects non-8-bit rasters", () => {
+describe("inferRenderPipeline for imagery", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const seedProps = (renderer: ReturnType<typeof inferRenderPipeline>) =>
+    renderer.buildPipeline(textures)[0]!.props as {
+      texture: { target: unknown };
+      channelMap: Int32Array;
+      nodata: number | null;
+      alphaMax: number;
+      nearest: boolean;
+    };
+
+  it("draws three 8-bit bands as RGB and four as RGBA from the band array", () => {
+    const rgb = preparedRenderer(
+      fakeGeoTiff({
+        sampleFormat: SampleFormat.Uint,
+        bitsPerSample: 8,
+        samplesPerPixel: 3,
+        photometric: Photometric.Rgb,
+        nodata: 0,
+      }),
+      stubGl(),
+    );
+    expect(moduleNames(rgb.buildPipeline(textures))).toEqual([
+      "band-texture-float",
+    ]);
+    expect(seedProps(rgb)).toMatchObject({
+      texture: { target: "TEXTURE_2D_ARRAY" },
+      nodata: 0,
+      nearest: false,
+    });
+    expect(Array.from(seedProps(rgb).channelMap)).toEqual([0, 1, 2, -1]);
+
+    const rgba = preparedRenderer(
+      fakeGeoTiff({
+        sampleFormat: SampleFormat.Uint,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        photometric: Photometric.Rgb,
+      }),
+      stubGl(),
+    );
+    expect(Array.from(seedProps(rgba).channelMap)).toEqual([0, 1, 2, 3]);
+    // Normalised texture: alpha is already in [0, 1].
+    expect(seedProps(rgba).alphaMax).toBe(1);
+  });
+
+  it("converts a single band by its photometric interpretation", () => {
+    const grey = preparedRenderer(
+      fakeGeoTiff({
+        sampleFormat: SampleFormat.Uint,
+        bitsPerSample: 8,
+        nodata: 255,
+      }),
+      stubGl(),
+    );
+    const pipeline = grey.buildPipeline({
+      ...textures,
+      mask: {} as WebGLTexture,
+    });
+    expect(moduleNames(pipeline)).toEqual([
+      "band-texture-float",
+      "mask-texture",
+      "black-is-zero",
+    ]);
+    expect(Array.from(seedProps(grey).channelMap)).toEqual([0, -1, -1, -1]);
+    // The sentinel in sampled units: an 8-bit texture samples as [0, 1].
+    expect(seedProps(grey).nodata).toBe(1);
+  });
+
+  it("samples palette rasters nearest and looks them up in the colormap", () => {
+    // `parseColormap` builds an ImageData, which jsdom does not provide.
+    vi.stubGlobal(
+      "ImageData",
+      class {
+        constructor(
+          readonly data: Uint8ClampedArray,
+          readonly width: number,
+          readonly height: number,
+        ) {}
+      },
+    );
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Uint,
+      bitsPerSample: 8,
+      photometric: Photometric.Palette,
+      colorMap: new Uint16Array(3 * 256),
+    });
+    const unprepared = inferRenderPipeline(geotiff, stubGl());
+    expect(() => unprepared.buildPipeline(textures)).toThrow(/prepare\(gl\)/);
+
+    const renderer = preparedRenderer(geotiff, stubGl());
+    expect(moduleNames(renderer.buildPipeline(textures))).toEqual([
+      "band-texture-float",
+      "colormap",
+    ]);
+    expect(seedProps(renderer).nearest).toBe(true);
+  });
+
+  it("still rejects non-8-bit rasters and more than four bands", () => {
     expect(() =>
       preparedRenderer(
         fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
         stubGl(),
       ),
     ).toThrow(/supported so far/);
+    expect(() =>
+      preparedRenderer(
+        fakeGeoTiff({
+          sampleFormat: SampleFormat.Uint,
+          bitsPerSample: 8,
+          samplesPerPixel: 5,
+        }),
+        stubGl(),
+      ),
+    ).toThrow(/SamplesPerPixel 5/);
   });
 });
 
@@ -810,6 +944,54 @@ describe("contour tile loading", () => {
     expect(fetchTiles).toHaveBeenCalledTimes(1);
   });
 
+  it("de-interleaves a decoded tile once, however many loads it neighbours", async () => {
+    const geotiff = fakeGeoTiff({
+      sampleFormat: SampleFormat.Uint,
+      bitsPerSample: 16,
+      samplesPerPixel: 2,
+    });
+    const { gl, uploads } = recordingGl();
+    const renderer = inferRenderPipeline(geotiff, gl, {
+      contour: { ...contour, band: 1 },
+    });
+    const tiles = new Map<string, unknown>();
+    const tileAt = (x: number, y: number) => {
+      const key = `${x}/${y}`;
+      if (!tiles.has(key)) {
+        tiles.set(key, {
+          x,
+          y,
+          array: {
+            layout: "pixel-interleaved" as const,
+            width: 2,
+            height: 2,
+            count: 2,
+            data: new Uint16Array([1, 2, 1, 2, 1, 2, 1, 2]),
+            mask: null,
+          },
+        });
+      }
+      return tiles.get(key);
+    };
+    const fetchTiles = vi.fn(async (xy: Array<[number, number]>) =>
+      xy.map(([x, y]) => tileAt(x, y)),
+    );
+    const image = {
+      tileCount: { x: 2, y: 1 },
+      fetchTiles,
+    } as unknown as GeoTIFF;
+    await loadTile(renderer, gl, image, 0, 0);
+    await loadTile(renderer, gl, image, 1, 0);
+    // Two tiles × two layers, each layer that band's plane.
+    expect(uploads.map((u) => u.layer)).toEqual([0, 1, 0, 1]);
+    expect(Array.from(uploads[1]!.data as Uint16Array)).toEqual(
+      Array(16).fill(2),
+    );
+    // The same decoded tile served both loads, so the planes came from the
+    // cache: identical arrays back the halo of the second load's neighbour.
+    expect(fetchTiles).toHaveBeenCalledTimes(1);
+  });
+
   it("renders a tile whose neighbour is missing, clamping that seam", async () => {
     const geotiff = fakeGeoTiff({
       sampleFormat: SampleFormat.Float,
@@ -861,34 +1043,57 @@ describe("contour tile loading", () => {
     expect(tile.byteLength).toBe(4 * 4 * 4 + 2 * 2);
   });
 
-  it("leaves the RGB renderer without a halo", async () => {
+  it("uploads imagery as one layer per band, without a halo", async () => {
     const geotiff = fakeGeoTiff({
       sampleFormat: SampleFormat.Uint,
       bitsPerSample: 8,
-      samplesPerPixel: 4,
+      samplesPerPixel: 3,
+      photometric: Photometric.Rgb,
     });
     const { gl, uploads } = recordingGl();
     const renderer = preparedRenderer(geotiff, gl);
+    // Decoded band-separate (PlanarConfiguration = 2).
     const fetchTile = vi.fn(async (x: number, y: number) => ({
       x,
       y,
       array: {
-        layout: "pixel-interleaved" as const,
+        layout: "band-separate" as const,
         width: 2,
         height: 2,
-        count: 4,
-        data: new Uint8Array(16),
+        count: 3,
+        bands: [
+          new Uint8Array([1, 1, 1, 1]),
+          new Uint8Array([2, 2, 2, 2]),
+          new Uint8Array([3, 3, 3, 3]),
+        ],
         mask: null,
       },
     }));
+    const fetchTiles = vi.fn();
     const tile = await loadTile(
       renderer,
       gl,
-      { fetchTile } as unknown as GeoTIFF,
-      0,
-      0,
+      {
+        tileCount: { x: 3, y: 3 },
+        fetchTile,
+        fetchTiles,
+      } as unknown as GeoTIFF,
+      1,
+      1,
     );
-    expect(tile.halo).toBe(0);
-    expect(uploads[0]).toMatchObject({ width: 2, height: 2 });
+    // Only the tile itself: imagery never fetches its neighbours.
+    expect(fetchTile).toHaveBeenCalledTimes(1);
+    expect(fetchTiles).not.toHaveBeenCalled();
+    expect(tile).toMatchObject({ width: 2, height: 2, halo: 0 });
+    expect(uploads.map((u) => [u.layer, u.width, u.height])).toEqual([
+      [0, 2, 2],
+      [1, 2, 2],
+      [2, 2, 2],
+    ]);
+    // Each layer is that band's plane.
+    expect(Array.from(uploads[1]!.data as Uint8Array)).toEqual(
+      Array(4).fill(2),
+    );
+    expect(tile.byteLength).toBe(2 * 2 * 3);
   });
 });

@@ -288,6 +288,75 @@ export function createTexture2D(
   });
 }
 
+export interface CreateTextureArrayOptions {
+  width: number;
+  height: number;
+  /** One `width × height` single-channel plane per layer, in layer order. */
+  planes: readonly ArrayBufferView[];
+  /** A single-channel format: every plane is one band. */
+  format: GLTextureFormat;
+}
+
+/** Per-context `MAX_ARRAY_TEXTURE_LAYERS`: a constant, and `getParameter` stalls. */
+const MAX_ARRAY_TEXTURE_LAYERS = new WeakMap<WebGL2RenderingContext, number>();
+
+function maxArrayTextureLayers(gl: WebGL2RenderingContext): number {
+  let max = MAX_ARRAY_TEXTURE_LAYERS.get(gl);
+  if (max === undefined) {
+    max = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number;
+    MAX_ARRAY_TEXTURE_LAYERS.set(gl, max);
+  }
+  return max;
+}
+
+/**
+ * Upload a band stack as a `TEXTURE_2D_ARRAY`: one single-channel layer per
+ * plane, so the shader picks bands by layer index and a change of composite
+ * touches no texture. Always NEAREST, since the seeds interpolate with
+ * `texelFetch` themselves. Bracket-only, like {@link withTextureUpload}.
+ */
+export function createTextureArray(
+  gl: WebGL2RenderingContext,
+  options: CreateTextureArrayOptions,
+): WebGLTexture {
+  const { width, height, planes, format } = options;
+  const maxLayers = maxArrayTextureLayers(gl);
+  if (planes.length === 0) {
+    throw new RangeError("a texture array needs at least one plane");
+  }
+  if (planes.length > maxLayers) {
+    throw new Error(
+      `${planes.length} bands exceed MAX_ARRAY_TEXTURE_LAYERS (${maxLayers})`,
+    );
+  }
+  return withTextureUpload(gl, gl.TEXTURE_2D_ARRAY, () => {
+    gl.texStorage3D(
+      gl.TEXTURE_2D_ARRAY,
+      1,
+      format.internalFormat,
+      width,
+      height,
+      planes.length,
+    );
+    planes.forEach((plane, layer) => {
+      gl.texSubImage3D(
+        gl.TEXTURE_2D_ARRAY,
+        0,
+        0,
+        0,
+        layer,
+        width,
+        height,
+        1,
+        format.format,
+        format.type,
+        plane,
+      );
+    });
+    setSamplerParameters(gl, gl.TEXTURE_2D_ARRAY, gl.NEAREST);
+  });
+}
+
 /**
  * Upload a colormap sprite as a single-layer `TEXTURE_2D_ARRAY`. Bracket-only,
  * like {@link withTextureUpload}.

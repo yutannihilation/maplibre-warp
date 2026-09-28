@@ -94,8 +94,8 @@ evaluated straight into MapLibre mercator `[0, 1]` in float64. Flat areas get a
 handful of triangles; areas where the projection curves get more.
 
 **Styling.** Shader modules are concatenated into one fragment shader —
-texture seed, nodata discard, mask discard, photometric conversion, colormap —
-and one program is compiled per distinct module chain.
+band seed, mask discard, photometric conversion, colormap — and one program
+is compiled per distinct module chain.
 
 ### Contours in the shader
 
@@ -147,10 +147,10 @@ layer.setContour({ thresholds: [100, 300, 500, 700, 900], fill: "none" });
 layer.setOpacity(0.5);
 ```
 
-The value is read with an exactly typed sampler (`sampler2D`, `usampler2D`
-or `isampler2D`), so int16, uint16 and float32 rasters work here, and
-interpolated bilinearly in the shader with `texelFetch` — integer textures
-cannot be LINEAR-filtered, and this also keeps nodata exact. Bands classify
+The value is read from the band array with an exactly typed sampler, so
+int16, uint16 and float32 rasters work here, and interpolated bilinearly in
+the shader with `texelFetch` — integer textures cannot be LINEAR-filtered,
+and this also keeps nodata exact. Bands classify
 the value against up to 64 thresholds and look their colour up in a small
 texture; the gradient maps the value onto a 256-texel ramp instead; lines
 measure the distance to the nearest threshold in screen pixels via `fwidth`,
@@ -205,19 +205,18 @@ choice, are in [`docs/internals.md`](docs/internals.md).
   float32 mercator and jitter from around z14 — the same limit MapLibre's own
   layers have there. The `globe` projection is unaffected: it renders flat
   mercator above z12, where the relative-to-centre path takes over.
+- **Every band is uploaded.** A tile costs `width × height × bands × bytes`
+  on the GPU whether one band or four are drawn; a 13-band uint16 stack is
+  26 bytes per pixel.
 - **8-bit unsigned samples only for imagery.** 16/32-bit and signed/float
-  rasters throw an explicit error rather than rendering something wrong; they
-  need the integer-sampler path for colour output. The contour path already
-  reads them through typed samplers.
+  rasters throw an explicit error rather than rendering something wrong:
+  their tiles load, but drawing them as colour needs a stretch. The contour
+  path already reads them through typed samplers.
 - **No terrain draping.** MapLibre renders custom layers directly rather than
   through its render-to-texture pass, so with `map.setTerrain` active the raster
   stays flat at z = 0. Same limitation as deck.gl's interleaved mode.
 - **Primary world only.** Panning past the antimeridian will not draw a wrapped
   copy of the raster.
-- **Nodata edges.** Nodata is a `discard` on an exact value comparison. With
-  linear filtering, texels straddling a nodata boundary interpolate away from
-  the sentinel, so a one-texel halo can appear. Palette images already use
-  nearest filtering; everything else uses linear.
 - **Single COG per layer.** No band compositing across files, no mosaics.
 
 ## Development
