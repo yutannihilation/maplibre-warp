@@ -10,10 +10,7 @@
  * Everything here is pure: fetching is the caller's business.
  */
 
-import type {
-  RasterArrayPixelInterleaved,
-  RasterTypedArray,
-} from "@developmentseed/geotiff";
+import type { RasterTypedArray } from "@developmentseed/geotiff";
 import { allocateLike } from "./geotiff-utils.js";
 
 /**
@@ -77,11 +74,15 @@ export function neighbourCoordinates(
   return out;
 }
 
-/** What {@link stitchHalo} reads of a tile: its shape, samples and mask. */
-export type Stitchable = Pick<
-  RasterArrayPixelInterleaved,
-  "width" | "height" | "count" | "data" | "mask"
->;
+/** What {@link stitchHalo} reads of a tile: one band's plane and the mask. */
+export interface Stitchable {
+  width: number;
+  height: number;
+  /** `width × height` samples of one band. */
+  data: RasterTypedArray;
+  /** Validity mask of the same size, or `null`. */
+  mask: Uint8Array | null;
+}
 
 /**
  * Pad `centre` by {@link HALO} texels on every side with the adjacent edge
@@ -97,7 +98,7 @@ export type Stitchable = Pick<
  * decoded with `boundless: false` are clipped, so this holds for every pair
  * inside one image; anything else is a caller error and throws.
  *
- * @returns The padded pixel-interleaved data, `(width + 2) × (height + 2)`.
+ * @returns The padded plane, `(width + 2) × (height + 2)`.
  */
 export function stitchHalo(
   centre: Stitchable,
@@ -106,16 +107,16 @@ export function stitchHalo(
   if ((HALO as number) !== 1) {
     throw new Error(`stitchHalo writes one ring of padding; HALO is ${HALO}`);
   }
-  const { width: w, height: h, count } = centre;
+  const { width: w, height: h } = centre;
   const src = centre.data;
-  if (src.length !== w * h * count) {
+  if (src.length !== w * h) {
     throw new Error(
-      `centre tile has ${src.length} samples, expected ${w}×${h}×${count}`,
+      `centre tile has ${src.length} samples, expected ${w}×${h}`,
     );
   }
   const pw = w + 2 * HALO;
   const ph = h + 2 * HALO;
-  const out = allocateLike(src, pw * ph * count);
+  const out = allocateLike(src, pw * ph);
 
   // Validate each neighbour once, into a grid indexed like the input.
   const grid: Array<Stitchable | undefined> = [];
@@ -125,14 +126,9 @@ export function stitchHalo(
     if (!n) {
       continue;
     }
-    if (n.count !== count) {
+    if (n.data.length !== n.width * n.height) {
       throw new Error(
-        `neighbour (${dx},${dy}) has ${n.count} bands, centre has ${count}`,
-      );
-    }
-    if (n.data.length !== n.width * n.height * n.count) {
-      throw new Error(
-        `neighbour (${dx},${dy}) has ${n.data.length} samples, expected ${n.width}×${n.height}×${n.count}`,
+        `neighbour (${dx},${dy}) has ${n.data.length} samples, expected ${n.width}×${n.height}`,
       );
     }
     if (dx === 0 && n.width !== w) {
@@ -158,11 +154,7 @@ export function stitchHalo(
     pcol: number,
     prow: number,
   ): void => {
-    const from = (row * tile.width + col) * count;
-    const to = (prow * pw + pcol) * count;
-    for (let b = 0; b < count; b++) {
-      out[to + b] = tile.data[from + b]!;
-    }
+    out[prow * pw + pcol] = tile.data[row * tile.width + col]!;
   };
   /** Whether `tile` marks texel `(col, row)` as missing. */
   const masked = (tile: Stitchable, col: number, row: number): boolean =>
@@ -179,10 +171,7 @@ export function stitchHalo(
 
   // Interior: one row copy per line.
   for (let row = 0; row < h; row++) {
-    out.set(
-      src.subarray(row * w * count, (row + 1) * w * count),
-      ((row + HALO) * pw + HALO) * count,
-    );
+    out.set(src.subarray(row * w, (row + 1) * w), (row + HALO) * pw + HALO);
   }
 
   // Edges: the neighbour's edge line, or the centre's own where it is
@@ -212,13 +201,7 @@ export function stitchHalo(
   // way the sampler would, by copying the already-filled padded texel that
   // is nearest along whichever axis has a neighbour. In a rectangular grid a
   // missing diagonal means at most one of the two edge neighbours exists.
-  const padded: Stitchable = {
-    width: pw,
-    height: ph,
-    count,
-    data: out,
-    mask: null,
-  };
+  const padded: Stitchable = { width: pw, height: ph, data: out, mask: null };
   for (const [dx, dy] of NEIGHBOUR_OFFSETS) {
     if (dx === 0 || dy === 0) {
       continue;

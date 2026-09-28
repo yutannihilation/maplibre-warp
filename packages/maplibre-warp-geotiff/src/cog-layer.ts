@@ -133,10 +133,11 @@ export class COGLayer extends RasterCustomLayer {
   private readonly props: COGLayerProps;
   /** Current contour options; starts as `props.contour`, see {@link setContour}. */
   private contour?: ContourRenderOptions;
-  /** Band model of {@link contour}, resolved once alongside its validation. */
-  private contourBands: ContourBandWithColor[] = [];
-  /** Gradient model of {@link contour}, likewise. */
-  private contourGradient: ContourGradient | null = null;
+  /**
+   * {@link contour} resolved: validated once, fed to the renderer, and what
+   * {@link getBands} and {@link getGradient} read.
+   */
+  private resolvedContour?: ResolvedContourOptions;
   /** Current imagery options; start as the props', see {@link setBands}. */
   private imagery: ImageryRenderOptions;
   private renderer?: GeoTiffRenderer;
@@ -147,23 +148,12 @@ export class COGLayer extends RasterCustomLayer {
     // Fail here rather than inside the retried source-open path; what
     // depends on the file's tags is checked again when they are known.
     if (props.contour) {
-      this.rememberContourModel(resolveContourOptions(props.contour));
+      this.resolvedContour = resolveContourOptions(props.contour);
     }
     validateImageryOptions(props);
     this.props = props;
     this.contour = props.contour;
     this.imagery = { bands: props.bands, rescale: props.rescale };
-  }
-
-  private rememberContourModel(resolved: ResolvedContourOptions): void {
-    this.contourBands = resolved.bands;
-    this.contourGradient = resolved.gradient
-      ? {
-          min: resolved.gradient.min,
-          max: resolved.gradient.max,
-          stops: resolved.gradient.stops,
-        }
-      : null;
   }
 
   /** The opened GeoTIFF, once the header has been read. */
@@ -177,7 +167,7 @@ export class COGLayer extends RasterCustomLayer {
    * fill is `"bands"`.
    */
   getBands(): ContourBandWithColor[] {
-    return this.contourBands.slice();
+    return this.resolvedContour?.bands.slice() ?? [];
   }
 
   /**
@@ -185,8 +175,9 @@ export class COGLayer extends RasterCustomLayer {
    * before the COG has opened; `null` unless the fill is `"gradient"`.
    */
   getGradient(): ContourGradient | null {
-    return this.contourGradient
-      ? { ...this.contourGradient, stops: this.contourGradient.stops.slice() }
+    const gradient = this.resolvedContour?.gradient;
+    return gradient
+      ? { min: gradient.min, max: gradient.max, stops: gradient.stops.slice() }
       : null;
   }
 
@@ -220,16 +211,13 @@ export class COGLayer extends RasterCustomLayer {
       this.geotiff?.cachedTags.samplesPerPixel,
     );
     if (this.renderer) {
-      if (!this.renderer.updateContour) {
-        throw new Error("the active renderer does not support updateContour");
-      }
       // Recorded now, applied by `prepare` in the next frame's `prerender`,
       // inside MapLibre's GL-state bracket.
       this.renderer.updateContour(resolved);
       this.map?.triggerRepaint();
     }
     this.contour = contour;
-    this.rememberContourModel(resolved);
+    this.resolvedContour = resolved;
   }
 
   /**
@@ -265,9 +253,6 @@ export class COGLayer extends RasterCustomLayer {
     }
     validateImageryOptions(imagery);
     if (this.renderer) {
-      if (!this.renderer.updateImagery) {
-        throw new Error("the active renderer does not support updateImagery");
-      }
       // Validates against the file's tags before touching any tile.
       this.renderer.updateImagery(imagery);
       this.map?.triggerRepaint();

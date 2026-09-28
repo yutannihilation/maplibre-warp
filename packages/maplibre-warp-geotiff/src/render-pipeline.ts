@@ -335,18 +335,6 @@ export function resolveContourOptions(
 }
 
 /**
- * Reject every contour configuration error up front, so a bad option fails
- * at construction instead of surfacing as a retried source-open failure
- * after the COG header has been fetched.
- */
-export function validateContourOptions(
-  contour: ContourRenderOptions,
-  samplesPerPixel?: number,
-): void {
-  resolveContourOptions(contour, samplesPerPixel);
-}
-
-/**
  * How a GeoTIFF's tiles become GPU textures and a module chain.
  *
  * GL is touched only by `prepare`, `uploadTileTextures`, `destroyTileTextures`
@@ -401,21 +389,23 @@ export interface GeoTiffRenderer {
   destroy(gl: WebGL2RenderingContext): void;
   /**
    * Re-style contours for every tile already built: any change, including
-   * the `band` to read, the fill mode or lines on and off. Only the contour
-   * renderer has this. Takes options already run through
-   * {@link resolveContourOptions} so the caller validates exactly once.
+   * the `band` to read, the fill mode or lines on and off. Takes options
+   * already run through {@link resolveContourOptions} so the caller
+   * validates exactly once.
    *
    * GL-free: it records the change, which the next {@link prepare} applies.
-   * Until then tiles keep their current, consistent style.
+   * Until then tiles keep their current, consistent style. The imagery
+   * renderer refuses it with a `RangeError`: its tiles are not contours.
    */
-  updateContour?(contour: ResolvedContourOptions): void;
+  updateContour(contour: ResolvedContourOptions): void;
   /**
    * Re-compose imagery in place, for every tile already built: another band
-   * selection, another stretch, or both. Only the imagery renderer has this.
-   * Validates against the file's tags and throws a `RangeError` before
-   * touching any tile. GL-free, and takes effect on the next frame.
+   * selection, another stretch, or both. Validates against the file's tags
+   * and throws a `RangeError` before touching any tile. GL-free, and takes
+   * effect on the next frame. The contour renderer refuses it with a
+   * `RangeError`: its tiles are not imagery.
    */
-  updateImagery?(imagery: ImageryRenderOptions): void;
+  updateImagery(imagery: ImageryRenderOptions): void;
 }
 
 export interface InferRenderPipelineOptions extends ImageryRenderOptions {
@@ -449,20 +439,27 @@ export function inferRenderPipeline(
  * band is its own layer of the tile's texture array — and the unit
  * conversions that follow from it. A normalised texture samples as [0, 1];
  * every other format returns raw texel values. `denorm` takes a sampled
- * value back to raw units, and `nodataSampled` is the sentinel in sampled
- * units.
+ * value back to raw units, `nodataSampled` is the sentinel in sampled units,
+ * and `alphaMax` is what a sampled alpha band is divided by to reach [0, 1].
  */
 function bandSampling(
   geotiff: GeoTIFF,
   gl: WebGL2RenderingContext,
-): { format: GLTextureFormat; denorm: number; nodataSampled: number | null } {
+): {
+  format: GLTextureFormat;
+  denorm: number;
+  nodataSampled: number | null;
+  alphaMax: number;
+} {
   const { bitsPerSample, sampleFormat, nodata } = geotiff.cachedTags;
   const format = inferTextureFormat(gl, 1, bitsPerSample, sampleFormat!);
-  const denorm = format.normalized ? 2 ** bitsPerSample[0]! - 1 : 1;
+  const bits = bitsPerSample[0]!;
+  const denorm = format.normalized ? 2 ** bits - 1 : 1;
   return {
     format,
     denorm,
     nodataSampled: nodata === null ? null : nodata / denorm,
+    alphaMax: sampleTypeMax(bits, sampleFormat![0]!) / denorm,
   };
 }
 
@@ -539,13 +536,9 @@ function createImageryRenderer(
     format: textureFormat,
     denorm,
     nodataSampled,
+    alphaMax,
   } = bandSampling(geotiff, gl);
   const seed = BandTexture[textureFormat.sampler];
-  const bits = bitsPerSample[0]!;
-  // An alpha band is divided back to [0, 1].
-  const alphaMax = textureFormat.normalized
-    ? 1
-    : sampleTypeMax(bits, sampleFormat![0]!);
 
   // Palette indices cannot be interpolated — a value halfway between two
   // classes is a third, unrelated class.
@@ -569,7 +562,7 @@ function createImageryRenderer(
       samplesPerPixel,
       photometric,
       extraSamples: options.extraSamples ?? null,
-      bitsPerSample: bits,
+      bitsPerSample: bitsPerSample[0]!,
       sampleFormat: sampleFormat![0]!,
       denorm,
     });
@@ -678,6 +671,11 @@ function createImageryRenderer(
         colormapTexture = undefined;
       }
     },
+    updateContour: () => {
+      throw new RangeError(
+        "updateContour needs the contour renderer; this one draws imagery",
+      );
+    },
     updateImagery: (imagery) => {
       // Resolves (and so validates) before anything is touched.
       const next = createStyle(resolve(imagery));
@@ -717,28 +715,30 @@ interface PlanarTile {
  */
 function planarTile(tile: Tile): PlanarTile {
   const { array } = tile;
-  if (array.layout === "pixel-interleaved") {
-    const { width, height, count, mask, transform, crs, nodata } = array;
-    tile.array = {
-      layout: "band-separate",
-      width,
-      height,
-      count,
-      mask,
-      transform,
-      crs,
-      nodata,
-      bands: bandPlanes(array),
-    };
+  const { width, height, mask } = array;
+  if (array.layout === "band-separate") {
+    return { width, height, planes: bandPlanes(array), mask };
   }
-  const { width, height, mask } = tile.array;
-  return { width, height, planes: bandPlanes(tile.array), mask };
+  const planes = bandPlanes(array);
+  const { count, transform, crs, nodata } = array;
+  tile.array = {
+    layout: "band-separate",
+    width,
+    height,
+    count,
+    mask,
+    transform,
+    crs,
+    nodata,
+    bands: planes,
+  };
+  return { width, height, planes, mask };
 }
 
 /** One band of a planar tile, in the shape the halo stitcher reads. */
 function plane(tile: PlanarTile, band: number): Stitchable {
   const { width, height, mask } = tile;
-  return { width, height, count: 1, data: tile.planes[band]!, mask };
+  return { width, height, data: tile.planes[band]!, mask };
 }
 
 /**
@@ -1044,6 +1044,11 @@ function createContourRenderer(
     },
     updateContour: (next) => {
       pending = next;
+    },
+    updateImagery: () => {
+      throw new RangeError(
+        "updateImagery needs the imagery renderer; this one draws contours",
+      );
     },
   };
 }
