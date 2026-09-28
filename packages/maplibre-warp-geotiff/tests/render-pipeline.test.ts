@@ -248,6 +248,86 @@ describe("inferRenderPipeline for imagery", () => {
     ).toThrow(/out of range/);
   });
 
+  describe("updateImagery", () => {
+    it("re-composes tiles that were built before the change", () => {
+      const gl = stubGl();
+      const renderer = preparedRenderer(maxar, gl, {
+        bands: [4, 2, 1],
+        rescale: [0, 2000],
+      });
+      const built = renderer.buildPipeline(textures);
+      const other = renderer.buildPipeline({ ...textures, width: 64 });
+
+      renderer.updateImagery!({ bands: [6], rescale: [1000, 3600] });
+
+      // Same arrays, re-filled: the payloads keep pointing at them.
+      expect(moduleNames(built)).toEqual([
+        "band-texture-uint",
+        "linear-rescale",
+        "black-is-zero",
+      ]);
+      expect(Array.from(built[0]!.props.channelMap)).toEqual([6, -1, -1, -1]);
+      expect(Array.from(built[1]!.props.min)).toEqual([1000, 1000, 1000]);
+      // Every tile shares the style objects, but keeps its own size.
+      expect(other[0]!.props.channelMap).toBe(built[0]!.props.channelMap);
+      expect(other[1]!.props).toBe(built[1]!.props);
+      expect(other[0]!.props.size).toEqual(new Float32Array([64, 128]));
+      // Tiles built afterwards share them too.
+      expect(renderer.buildPipeline(textures)[1]!.props).toBe(built[1]!.props);
+    });
+
+    it("updates a same-shaped chain in place, without rebuilding", () => {
+      const gl = stubGl();
+      const renderer = preparedRenderer(maxar, gl, {
+        bands: [4, 2, 1],
+        rescale: [0, 2000],
+      });
+      const built = renderer.buildPipeline(textures);
+      const seedProps = built[0]!.props;
+      const rescaleProps = built[1]!.props;
+
+      // A slider drives this at input rate: only the values move.
+      renderer.updateImagery!({ bands: [6, 4, 2], rescale: [0, 900] });
+      expect(built[0]!.props).toBe(seedProps);
+      expect(built[1]!.props).toBe(rescaleProps);
+      expect(Array.from(seedProps.channelMap)).toEqual([6, 4, 2, -1]);
+      expect(Array.from(rescaleProps.max)).toEqual([900, 900, 900]);
+      // Tiles built later share the same arrays.
+      const later = renderer.buildPipeline(textures);
+      expect(later[0]!.props.channelMap).toBe(seedProps.channelMap);
+      expect(later[1]!.props).toBe(rescaleProps);
+    });
+
+    it("validates against the file and leaves tiles alone on failure", () => {
+      const gl = stubGl();
+      const renderer = preparedRenderer(maxar, gl, {
+        bands: [4, 2, 1],
+        rescale: [0, 2000],
+      });
+      const built = renderer.buildPipeline(textures);
+      expect(() =>
+        renderer.updateImagery!({ bands: [8], rescale: [0, 1] }),
+      ).toThrow(/out of range/);
+      expect(() => renderer.updateImagery!({ bands: [6] })).toThrow(
+        /needs `rescale`/,
+      );
+      expect(Array.from(built[0]!.props.channelMap)).toEqual([4, 2, 1, -1]);
+      expect(moduleNames(built)).toEqual([
+        "band-texture-uint",
+        "linear-rescale",
+      ]);
+    });
+
+    it("is absent from the contour renderer", () => {
+      const renderer = inferRenderPipeline(
+        fakeGeoTiff({ sampleFormat: SampleFormat.Float, bitsPerSample: 32 }),
+        stubGl(),
+        { contour: { thresholds: [1], fill: "none" } },
+      );
+      expect(renderer.updateImagery).toBeUndefined();
+    });
+  });
+
   it("draws three 8-bit bands as RGB from the band array", () => {
     const rgb = preparedRenderer(
       fakeGeoTiff({

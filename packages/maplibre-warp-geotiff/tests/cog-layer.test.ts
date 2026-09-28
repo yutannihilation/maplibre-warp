@@ -221,4 +221,29 @@ describe("COGLayer imagery configuration", () => {
       () => new COGLayer({ id: "i5", geotiff, bands: [12], rescale: [0, 1] }),
     ).not.toThrow();
   });
+
+  it("setBands and setRescale validate before the layer is added", () => {
+    const layer = new COGLayer({ id: "i6", geotiff, bands: [4, 2, 1] });
+    expect(() => layer.setBands([6, 4, 2], [0, 3000])).not.toThrow();
+    expect(() => layer.setBands([0, 1])).toThrow(RangeError);
+    expect(() => layer.setRescale([1, 0])).toThrow(RangeError);
+    // Three pairs no longer fit once a single band is selected.
+    layer.setRescale([
+      [0, 1],
+      [0, 1],
+      [0, 1],
+    ]);
+    expect(() => layer.setBands([6])).toThrow(/1 colour channel/);
+    expect(() => layer.setRescale(undefined)).not.toThrow();
+  });
+
+  it("refuses on a layer created with contour", () => {
+    const layer = new COGLayer({
+      id: "i7",
+      geotiff,
+      contour: { thresholds: [1], fill: "none" },
+    });
+    expect(() => layer.setBands([0])).toThrow(RangeError);
+    expect(() => layer.setRescale([0, 1])).toThrow(RangeError);
+  });
 });
