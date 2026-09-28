@@ -54,8 +54,8 @@ import {
   WhiteIsZero,
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 
-import type { ColorConversion } from "./bands.js";
-import { resolveImagery, validateBandIndex } from "./bands.js";
+import type { ColorConversion, ImageryRenderOptions } from "./bands.js";
+import { resolveImageryOptions, validateBandIndex } from "./bands.js";
 import { bandPlanes, toGlView } from "./geotiff-utils.js";
 import type { Stitchable } from "./halo.js";
 import {
@@ -402,8 +402,8 @@ export interface GeoTiffRenderer {
   updateContour?(contour: ResolvedContourOptions): void;
 }
 
-export interface InferRenderPipelineOptions {
-  /** Render as contours instead of imagery. */
+export interface InferRenderPipelineOptions extends ImageryRenderOptions {
+  /** Render as contours instead of imagery; `bands` is ignored. */
   contour?: ContourRenderOptions;
   /**
    * The primary IFD's `ExtraSamples` tag (see `readExtraSamples`), which
@@ -515,8 +515,8 @@ function livePipelines(
 
 /**
  * Imagery renderer: `BandTexture` seed → mask → colour, for 8-bit unsigned
- * samples. The bands to draw and their colour conversion follow the tags;
- * see `resolveBandSelection`.
+ * samples. The bands to draw are `bands`, or follow the tags by default (see
+ * `resolveBandSelection`); the colour conversion follows the selection.
  */
 function createImageryRenderer(
   geotiff: GeoTIFF,
@@ -526,7 +526,7 @@ function createImageryRenderer(
   const { colorMap, photometric, samplesPerPixel } = geotiff.cachedTags;
   const { format: textureFormat, nodataSampled } = bandSampling(geotiff, gl);
   const seed = BandTexture[textureFormat.sampler];
-  const { channelMap, color } = resolveImagery({
+  const { channelMap, color } = resolveImageryOptions(options, {
     samplesPerPixel,
     photometric,
     extraSamples: options.extraSamples ?? null,

@@ -6,6 +6,15 @@
 import type { TiffImage } from "@cogeotiff/core";
 import { Photometric, TiffTag } from "@cogeotiff/core";
 
+/** How imagery is composed from a raster's bands. */
+export interface ImageryRenderOptions {
+  /**
+   * 0-based file bands to draw: `[gray]`, `[r, g, b]` or `[r, g, b, a]`.
+   * Defaults from the TIFF tags, see {@link resolveBandSelection}.
+   */
+  bands?: readonly number[];
+}
+
 /** TIFF `ExtraSamples` values that mark a band as alpha. */
 const ALPHA_EXTRA_SAMPLES: readonly number[] = [
   1, // associated (premultiplied) alpha
@@ -33,7 +42,7 @@ export async function readExtraSamples(
 
 /**
  * Check one 0-based band index: a non-negative integer and, when the file's
- * band count is known, inside it.
+ * band count is known, inside it. Shared by the imagery and contour options.
  */
 export function validateBandIndex(
   band: number,
@@ -46,6 +55,27 @@ export function validateBandIndex(
     throw new RangeError(
       `band ${band} is out of range for a ${samplesPerPixel}-band raster`,
     );
+  }
+}
+
+/** Selected band counts a composite can have. */
+const SELECTION_LENGTHS: readonly number[] = [1, 3, 4];
+
+/**
+ * Check a band list: one, three or four non-negative integers, inside the
+ * file when its band count is known.
+ */
+export function validateBandList(
+  bands: readonly number[],
+  samplesPerPixel?: number,
+): void {
+  if (!SELECTION_LENGTHS.includes(bands.length)) {
+    throw new RangeError(
+      `bands must list 1 (grey), 3 (RGB) or 4 (RGBA) bands, got ${bands.length}`,
+    );
+  }
+  for (const band of bands) {
+    validateBandIndex(band, samplesPerPixel);
   }
 }
 
@@ -81,16 +111,37 @@ function alphaBand(tags: BandSelectionTags): number {
 }
 
 /**
- * The bands to draw, as 0-based file indices, by the tags: a palette draws
- * its index band; CMYK its four channels; an RGB-like interpretation its
- * three colour bands, plus the fourth when `ExtraSamples` declares that band
- * alpha; grey files with one band draw grey, with three or four bands they
- * draw as RGB(A) by the same alpha rule — NAIP's fourth band is
- * near-infrared, not alpha. Anything else (grey + alpha, a five-band grey
- * stack) has no default and is refused with a `RangeError`.
+ * The bands to draw, as 0-based file indices.
+ *
+ * With `bands` given, it is validated against the file. Without it, the
+ * default follows the tags: a palette draws its index band; CMYK its four
+ * channels; an RGB-like interpretation its three colour bands, plus the
+ * fourth when `ExtraSamples` declares that band alpha; grey files with one
+ * band draw grey, with three or four bands they draw as RGB(A) by the same
+ * alpha rule — NAIP's fourth band is near-infrared, not alpha. Anything else
+ * (grey + alpha, a five-band grey stack) has no default: the caller must say
+ * which bands it wants.
  */
-export function resolveBandSelection(tags: BandSelectionTags): number[] {
+export function resolveBandSelection(
+  tags: BandSelectionTags,
+  bands?: readonly number[],
+): number[] {
   const { samplesPerPixel, photometric } = tags;
+  if (bands !== undefined) {
+    validateBandList(bands, samplesPerPixel);
+    if (
+      photometric === Photometric.Separated ||
+      photometric === Photometric.Cielab
+    ) {
+      throw new RangeError(
+        "bands cannot be chosen for CMYK or CIELab rasters; their channels have fixed meaning",
+      );
+    }
+    if (photometric === Photometric.Palette && bands.length !== 1) {
+      throw new RangeError("a palette raster draws exactly one band");
+    }
+    return [...bands];
+  }
   const base = photometricBandCount(photometric);
   if (samplesPerPixel < base) {
     throw new RangeError(
@@ -116,7 +167,7 @@ export function resolveBandSelection(tags: BandSelectionTags): number[] {
       return rgba();
     default:
       throw new RangeError(
-        `a ${samplesPerPixel}-band raster has no default composite`,
+        `a ${samplesPerPixel}-band raster has no default composite; pass \`bands\``,
       );
   }
 }
@@ -133,6 +184,17 @@ export function channelMap(selection: readonly number[]): Int32Array {
     map[i] = band;
   });
   return map;
+}
+
+/**
+ * Check imagery options as far as they can be without the file: the band
+ * list's shape. Range against the file is checked by
+ * {@link resolveImageryOptions}.
+ */
+export function validateImageryOptions(options: ImageryRenderOptions): void {
+  if (options.bands !== undefined) {
+    validateBandList(options.bands);
+  }
 }
 
 /**
@@ -176,16 +238,19 @@ function colorConversion(
   }
 }
 
-/** Everything the imagery seed and its follow-up modules need from the tags. */
+/** Everything the imagery seed and its follow-up modules need from the options. */
 export interface ResolvedImagery {
   selection: number[];
   channelMap: Int32Array;
   color: ColorConversion;
 }
 
-/** Resolve the bands to draw and how they become a colour, in one pass. */
-export function resolveImagery(tags: BandSelectionTags): ResolvedImagery {
-  const selection = resolveBandSelection(tags);
+/** Resolve and validate the imagery options in one pass. */
+export function resolveImageryOptions(
+  options: ImageryRenderOptions,
+  tags: BandSelectionTags,
+): ResolvedImagery {
+  const selection = resolveBandSelection(tags, options.bands);
   return {
     selection,
     channelMap: channelMap(selection),
