@@ -1,3 +1,13 @@
+export type {
+  BandSelectionTags,
+  ColorConversion,
+  ResolvedImagery,
+} from "./bands.js";
+export {
+  readExtraSamples,
+  resolveBandSelection,
+  resolveImagery,
+} from "./bands.js";
 export type { COGLayerProps } from "./cog-layer.js";
 export { COGLayer } from "./cog-layer.js";
 export {
@@ -16,6 +26,7 @@ export type {
   GeoTiffRenderer,
   GeoTiffTilePixels,
   GeoTiffTileTextures,
+  InferRenderPipelineOptions,
   ResolvedContourOptions,
 } from "./render-pipeline.js";
 export {

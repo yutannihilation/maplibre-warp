@@ -144,6 +144,14 @@ export const DATASETS: Dataset[] = [
     note: "State Plane in US survey feet; MinIsBlack grayscale, nodata 255.",
   },
   {
+    id: "naip",
+    label: "NAIP Colorado 2023 (EPSG:26913, RGB+NIR uint8)",
+    url: "https://naipeuwest.blob.core.windows.net/naip/v002/co/2023/co_030cm_2023/40104/m_4010460_nw_13_030_20231020_20240104.tif",
+    center: [-104.72, 40.19],
+    zoom: 13,
+    note: "Four bands with ExtraSamples = 0: band 4 is near-infrared, not alpha, so the default draws RGB.",
+  },
+  {
     id: "swissalti3d",
     label: "swissALTI3D 1 km tile (EPSG:2056, float32) → shader contours",
     url: "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/swissalti3d_2019_2573-1085/swissalti3d_2019_2573-1085_2_2056_5728.tif",

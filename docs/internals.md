@@ -212,10 +212,14 @@ records a re-style for the next `prerender`.
    that a COG pyramid is a stack of independent grids, not a quadtree; the
    traversal finds children by mapping a tile's CRS bounds into the next
    level's grid.
-4. **Infer the render pipeline.** `inferRenderPipeline`
-   (`render-pipeline.ts`) reads `SampleFormat`, `BitsPerSample`,
+4. **Infer the render pipeline.** Alongside the CRS lookup, an imagery layer
+   reads the primary IFD's `ExtraSamples` tag (`readExtraSamples`,
+   `bands.ts`), which the library does not prefetch and which decides
+   whether a fourth band is alpha or data. `inferRenderPipeline`
+   (`render-pipeline.ts`) then reads `SampleFormat`, `BitsPerSample`,
    `SamplesPerPixel`, `PhotometricInterpretation`, `ColorMap` and nodata from
-   the tags and returns a `GeoTiffRenderer`: a GL-free tile loader, a
+   the tags, resolves the bands to draw (or the contour options) against
+   them, and returns a `GeoTiffRenderer`: a GL-free tile loader, a
    bracket-only texture uploader, and a function that builds the shader
    module chain for a tile. A `RangeError` here says the options do not fit
    the file, which no retry can change, so it is rethrown as an
