@@ -99,7 +99,7 @@ export interface COGLayerProps
    * Render the raster as contours — filled bands or a continuous gradient,
    * with or without lines — instead of as imagery. See
    * {@link ContourRenderOptions}; {@link COGLayer.setContour} switches
-   * between them live. `bands` is ignored with `contour`.
+   * between them live. `bands` and `rescale` are ignored with `contour`.
    */
   contour?: ContourRenderOptions;
 
@@ -152,7 +152,7 @@ export class COGLayer extends RasterCustomLayer {
     validateImageryOptions(props);
     this.props = props;
     this.contour = props.contour;
-    this.imagery = { bands: props.bands };
+    this.imagery = { bands: props.bands, rescale: props.rescale };
   }
 
   private rememberContourModel(resolved: ResolvedContourOptions): void {

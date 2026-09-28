@@ -96,21 +96,23 @@ evaluated straight into MapLibre mercator `[0, 1]` in float64. Flat areas get a
 handful of triangles; areas where the projection curves get more.
 
 **Styling.** Shader modules are concatenated into one fragment shader —
-band seed, mask discard, photometric conversion, colormap — and one program
-is compiled per distinct module chain.
+band seed, mask discard, stretch, photometric conversion, colormap — and one
+program is compiled per distinct module chain.
 
 ### Bands
 
 Every band of a tile is uploaded once, as one single-channel layer of a
 `TEXTURE_2D_ARRAY`, whatever the file's `PlanarConfiguration`. `bands` picks
-which of them make the picture:
+which of them make the picture, and `rescale` stretches them:
 
 ```ts
-// NAIP: red, green, blue and near-infrared. Bands are 0-based file indices.
+// WorldView-3: eight uint16 bands. Bands are 0-based file indices;
+// non-8-bit imagery needs a stretch, in sample units.
 const layer = new COGLayer({
-  id: "naip",
-  geotiff: "https://example.com/naip.tif",
-  bands: [3, 0, 1], // false-colour infrared; [3] draws one band as grey
+  id: "wv3",
+  geotiff: "https://example.com/scene-ms.tif",
+  bands: [4, 2, 1], // red, green, blue; [6] draws one band as grey
+  rescale: [0, 1800], // or one [min, max] per colour channel
 });
 ```
 
@@ -119,11 +121,14 @@ index band, CMYK its four channels, an RGB file its three colour bands plus
 the fourth when `ExtraSamples` declares that band alpha — NAIP's fourth band
 is near-infrared and is left out. A grey file draws one band as grey and
 three or four as RGB(A) by the same alpha rule; grey + alpha and grey stacks
-of five or more bands have no default and need `bands`. Samples
-are read with an exactly typed sampler (`sampler2DArray`, `usampler2DArray`,
-`isampler2DArray`) and interpolated bilinearly in the shader, so nodata is
-exact: a pixel is nodata when any of its colour bands is (palette rasters
-take the nearest texel instead). The contour `band` is the same layer index.
+of five or more bands have no default and need `bands`. Every sample type in
+the texture table is read with an exactly typed sampler (`sampler2DArray`,
+`usampler2DArray`, `isampler2DArray`) and interpolated bilinearly in the
+shader, so nodata is exact: a pixel is nodata when any of its colour bands
+is (palette rasters take the nearest texel instead). 8-bit unsigned samples
+default to their full range; anything else without `rescale` is a
+`RangeError` rather than a guessed stretch. The contour `band` is the same
+layer index.
 
 ### Contours in the shader
 
@@ -236,10 +241,6 @@ choice, are in [`docs/internals.md`](docs/internals.md).
 - **Every band is uploaded.** A tile costs `width × height × bands × bytes`
   on the GPU whether one band or four are drawn; a 13-band uint16 stack is
   26 bytes per pixel.
-- **8-bit unsigned samples only for imagery.** 16/32-bit and signed/float
-  rasters throw an explicit error rather than rendering something wrong:
-  their tiles load, but drawing them as colour needs a stretch. The contour
-  path already reads them through typed samplers.
 - **No terrain draping.** MapLibre renders custom layers directly rather than
   through its render-to-texture pass, so with `map.setTerrain` active the raster
   stays flat at z = 0. Same limitation as deck.gl's interleaved mode.

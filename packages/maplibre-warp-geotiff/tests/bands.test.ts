@@ -1,4 +1,4 @@
-import { Photometric } from "@cogeotiff/core";
+import { Photometric, SampleFormat } from "@cogeotiff/core";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -6,8 +6,11 @@ import {
   readExtraSamples,
   resolveBandSelection,
   resolveImageryOptions,
+  resolveRescale,
+  sampleTypeMax,
   validateBandList,
   validateImageryOptions,
+  validateRescale,
 } from "../src/bands.js";
 
 const tags = (
@@ -138,19 +141,160 @@ describe("validateBandList", () => {
   });
 });
 
+describe("validateRescale", () => {
+  it("normalises a pair or a list of pairs", () => {
+    expect(validateRescale([0, 2000])).toEqual([[0, 2000]]);
+    expect(
+      validateRescale([
+        [0, 1],
+        [2, 3],
+        [4, 5],
+      ]),
+    ).toHaveLength(3);
+  });
+
+  it("rejects malformed stretches", () => {
+    expect(() => validateRescale([2000, 0])).toThrow(/max must exceed min/);
+    expect(() => validateRescale([0, 0])).toThrow(/max must exceed min/);
+    expect(() => validateRescale([0, NaN])).toThrow(/finite/);
+    expect(() =>
+      validateRescale([
+        [0, 1],
+        [0, 1],
+      ]),
+    ).toThrow(/one per colour channel/);
+    expect(() =>
+      validateRescale([[0, 1, 2] as unknown as [number, number]]),
+    ).toThrow(/two finite numbers/);
+  });
+});
+
 describe("validateImageryOptions", () => {
-  it("checks the band list's shape, not its range", () => {
-    expect(() => validateImageryOptions({})).not.toThrow();
+  it("cross-checks the stretch against the selection when both are given", () => {
+    expect(() =>
+      validateImageryOptions({ bands: [4, 2, 1], rescale: [0, 1] }),
+    ).not.toThrow();
+    expect(() =>
+      validateImageryOptions({
+        bands: [4, 2, 1],
+        rescale: [
+          [0, 1],
+          [0, 1],
+          [0, 1],
+        ],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateImageryOptions({
+        bands: [6],
+        rescale: [
+          [0, 1],
+          [0, 1],
+          [0, 1],
+        ],
+      }),
+    ).toThrow(/1 colour channel/);
+    // Either alone is checked for shape only.
     expect(() => validateImageryOptions({ bands: [12] })).not.toThrow();
-    expect(() => validateImageryOptions({ bands: [0, 1] })).toThrow(RangeError);
+    expect(() => validateImageryOptions({ rescale: [1, 0] })).toThrow(
+      RangeError,
+    );
+  });
+});
+
+describe("resolveRescale", () => {
+  const uint16 = {
+    selectedCount: 3,
+    bitsPerSample: 16,
+    sampleFormat: SampleFormat.Uint,
+    denorm: 1,
+  };
+
+  it("needs no module for 8-bit unsigned samples and demands one otherwise", () => {
+    expect(
+      resolveRescale(undefined, { ...uint16, bitsPerSample: 8, denorm: 255 }),
+    ).toBeNull();
+    expect(() => resolveRescale(undefined, uint16)).toThrow(/needs `rescale`/);
+    expect(() =>
+      resolveRescale(undefined, {
+        ...uint16,
+        bitsPerSample: 32,
+        sampleFormat: SampleFormat.Float,
+      }),
+    ).toThrow(/32-bit Float/);
+  });
+
+  it("broadcasts one pair to every colour channel", () => {
+    const resolved = resolveRescale([0, 2000], uint16)!;
+    expect(Array.from(resolved.min)).toEqual([0, 0, 0]);
+    expect(Array.from(resolved.max)).toEqual([2000, 2000, 2000]);
+  });
+
+  it("keeps per-channel pairs in selection order", () => {
+    const resolved = resolveRescale(
+      [
+        [300, 1500],
+        [400, 1200],
+        [300, 800],
+      ],
+      uint16,
+    )!;
+    expect(Array.from(resolved.min)).toEqual([300, 400, 300]);
+    expect(Array.from(resolved.max)).toEqual([1500, 1200, 800]);
+  });
+
+  it("expresses the stretch in sampled units for normalised textures", () => {
+    const resolved = resolveRescale([51, 204], {
+      selectedCount: 1,
+      bitsPerSample: 8,
+      sampleFormat: SampleFormat.Uint,
+      denorm: 255,
+    })!;
+    expect(resolved.min[0]).toBeCloseTo(51 / 255);
+    expect(resolved.max[0]).toBeCloseTo(204 / 255);
+  });
+
+  it("rejects three pairs for a single grey band", () => {
+    expect(() =>
+      resolveRescale(
+        [
+          [0, 1],
+          [0, 1],
+          [0, 1],
+        ],
+        { ...uint16, selectedCount: 1 },
+      ),
+    ).toThrow(/1 colour channel/);
+  });
+});
+
+describe("sampleTypeMax", () => {
+  it("is the largest value of the sample type", () => {
+    expect(sampleTypeMax(8, SampleFormat.Uint)).toBe(255);
+    expect(sampleTypeMax(16, SampleFormat.Uint)).toBe(65535);
+    expect(sampleTypeMax(16, SampleFormat.Int)).toBe(32767);
+    expect(sampleTypeMax(32, SampleFormat.Float)).toBe(1);
   });
 });
 
 describe("resolveImageryOptions", () => {
-  it("resolves selection, channel map and colour together", () => {
-    const resolved = resolveImageryOptions({ bands: [4, 2, 1] }, tags(8));
+  const maxar = {
+    samplesPerPixel: 8,
+    photometric: Photometric.MinIsBlack,
+    extraSamples: null,
+    bitsPerSample: 16,
+    sampleFormat: SampleFormat.Uint,
+    denorm: 1,
+  };
+
+  it("resolves selection, channel map, stretch and colour together", () => {
+    const resolved = resolveImageryOptions(
+      { bands: [4, 2, 1], rescale: [0, 2000] },
+      maxar,
+    );
     expect(resolved.selection).toEqual([4, 2, 1]);
     expect(Array.from(resolved.channelMap)).toEqual([4, 2, 1, -1]);
+    expect(Array.from(resolved.rescale!.max)).toEqual([2000, 2000, 2000]);
     expect(resolved.color).toBe("rgb");
   });
 
@@ -160,19 +304,27 @@ describe("resolveImageryOptions", () => {
       bands: number[],
       samplesPerPixel = 4,
     ) =>
-      resolveImageryOptions({ bands }, tags(samplesPerPixel, photometric))
-        .color;
+      resolveImageryOptions(
+        { bands, rescale: [0, 1] },
+        { ...maxar, photometric, samplesPerPixel },
+      ).color;
     expect(colour(Photometric.MinIsBlack, [6], 8)).toBe("gray");
     expect(colour(Photometric.Rgb, [1])).toBe("gray");
     expect(colour(Photometric.MinIsWhite, [0])).toBe("gray-inverted");
     expect(colour(Photometric.MinIsWhite, [0, 1, 2])).toBe("rgb");
     expect(colour(Photometric.Palette, [0], 1)).toBe("palette");
     expect(
-      resolveImageryOptions({}, tags(4, Photometric.Separated)).color,
+      resolveImageryOptions(
+        { rescale: [0, 1] },
+        { ...maxar, photometric: Photometric.Separated, samplesPerPixel: 4 },
+      ).color,
     ).toBe("cmyk");
-    expect(resolveImageryOptions({}, tags(3, Photometric.Cielab)).color).toBe(
-      "cielab",
-    );
+    expect(
+      resolveImageryOptions(
+        { rescale: [0, 1] },
+        { ...maxar, photometric: Photometric.Cielab, samplesPerPixel: 3 },
+      ).color,
+    ).toBe("cielab");
   });
 });
 

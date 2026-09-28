@@ -3,11 +3,11 @@
  *
  * Decision logic ported from @developmentseed/deck.gl-raster (MIT, Development
  * Seed): `packages/deck.gl-geotiff/src/geotiff/render-pipeline.ts`. The
- * differences: textures are raw WebGL2 objects rather than luma.gl `Texture`s,
- * and every band of a tile is uploaded as one layer of a `TEXTURE_2D_ARRAY`,
- * read with an exactly typed sampler. Imagery is narrowed to 8-bit unsigned
- * samples so far, with an explicit error for the rest rather than a silent
- * wrong-looking render.
+ * differences: textures are raw WebGL2 objects rather than luma.gl `Texture`s;
+ * every band of a tile is uploaded as one layer of a `TEXTURE_2D_ARRAY`, so
+ * which bands are drawn is a uniform (`bands`, or the contour `band`); and
+ * any sample type in the texture table is accepted, read with an exactly
+ * typed sampler.
  */
 
 import { Photometric, SampleFormat } from "@cogeotiff/core";
@@ -29,6 +29,7 @@ import type {
   ContourBand,
   ContourLineProps,
   IsobandProps,
+  LinearRescaleProps,
   PackedThresholds,
   ValueGradientProps,
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
@@ -45,6 +46,7 @@ import {
   colorToVec4,
   gradientColorImage,
   Isoband,
+  LinearRescale,
   MaskTexture,
   packThresholds,
   resolveBandColors,
@@ -55,7 +57,11 @@ import {
 } from "@yutannihilation/maplibre-warp-raster/gpu-modules";
 
 import type { ColorConversion, ImageryRenderOptions } from "./bands.js";
-import { resolveImageryOptions, validateBandIndex } from "./bands.js";
+import {
+  resolveImageryOptions,
+  sampleTypeMax,
+  validateBandIndex,
+} from "./bands.js";
 import { bandPlanes, toGlView } from "./geotiff-utils.js";
 import type { Stitchable } from "./halo.js";
 import {
@@ -403,7 +409,7 @@ export interface GeoTiffRenderer {
 }
 
 export interface InferRenderPipelineOptions extends ImageryRenderOptions {
-  /** Render as contours instead of imagery; `bands` is ignored. */
+  /** Render as contours instead of imagery; `bands`/`rescale` are ignored. */
   contour?: ContourRenderOptions;
   /**
    * The primary IFD's `ExtraSamples` tag (see `readExtraSamples`), which
@@ -418,22 +424,12 @@ export function inferRenderPipeline(
   gl: WebGL2RenderingContext,
   options: InferRenderPipelineOptions = {},
 ): GeoTiffRenderer {
-  const { sampleFormat, bitsPerSample } = geotiff.cachedTags;
+  const { sampleFormat } = geotiff.cachedTags;
   if (sampleFormat === null) {
     throw new Error("SampleFormat tag is required to infer a render pipeline");
   }
   if (options.contour) {
     return createContourRenderer(geotiff, gl, options.contour);
-  }
-  if (sampleFormat[0] !== SampleFormat.Uint) {
-    throw new Error(
-      `Only unsigned-integer samples are supported so far; found SampleFormat ${sampleFormat}.`,
-    );
-  }
-  if (bitsPerSample[0] !== 8) {
-    throw new Error(
-      `Only 8-bit samples are supported so far; found BitsPerSample ${bitsPerSample[0]}.`,
-    );
   }
   return createImageryRenderer(geotiff, gl, options);
 }
@@ -514,8 +510,8 @@ function livePipelines(
 }
 
 /**
- * Imagery renderer: `BandTexture` seed → mask → colour, for 8-bit unsigned
- * samples. The bands to draw are `bands`, or follow the tags by default (see
+ * Imagery renderer: `BandTexture` seed → mask → stretch → colour. The bands
+ * to draw are `bands`, or follow the tags by default (see
  * `resolveBandSelection`); the colour conversion follows the selection.
  */
 function createImageryRenderer(
@@ -523,14 +519,36 @@ function createImageryRenderer(
   gl: WebGL2RenderingContext,
   options: InferRenderPipelineOptions,
 ): GeoTiffRenderer {
-  const { colorMap, photometric, samplesPerPixel } = geotiff.cachedTags;
-  const { format: textureFormat, nodataSampled } = bandSampling(geotiff, gl);
+  const {
+    bitsPerSample,
+    colorMap,
+    photometric,
+    sampleFormat,
+    samplesPerPixel,
+  } = geotiff.cachedTags;
+  const {
+    format: textureFormat,
+    denorm,
+    nodataSampled,
+  } = bandSampling(geotiff, gl);
   const seed = BandTexture[textureFormat.sampler];
-  const { channelMap, color } = resolveImageryOptions(options, {
+  const bits = bitsPerSample[0]!;
+  // An alpha band is divided back to [0, 1].
+  const alphaMax = textureFormat.normalized
+    ? 1
+    : sampleTypeMax(bits, sampleFormat![0]!);
+  const { channelMap, rescale, color } = resolveImageryOptions(options, {
     samplesPerPixel,
     photometric,
     extraSamples: options.extraSamples ?? null,
+    bitsPerSample: bits,
+    sampleFormat: sampleFormat![0]!,
+    denorm,
   });
+  const rescaleModule: {
+    module: typeof LinearRescale;
+    props: LinearRescaleProps;
+  } | null = rescale ? { module: LinearRescale, props: rescale } : null;
 
   // Palette indices cannot be interpolated — a value halfway between two
   // classes is a third, unrelated class.
@@ -558,15 +576,14 @@ function createImageryRenderer(
           texture: { texture: textures.texture, target: gl.TEXTURE_2D_ARRAY },
           channelMap,
           nodata: nodataSampled,
-          // 8-bit samples are normalised, so an alpha band is already in
-          // [0, 1].
-          alphaMax: 1,
+          alphaMax,
           nearest: isPalette,
           size: new Float32Array([textures.width, textures.height]),
           halo: textures.halo,
         },
       },
       ...maskModule(gl, textures),
+      ...(rescaleModule ? [rescaleModule] : []),
       ...(colorModule ? [colorModule] : []),
     ];
   };
