@@ -816,15 +816,27 @@ describe("inferRenderPipeline with contour", () => {
       ]);
     });
 
-    it("refuses to change the band", () => {
+    it("changes the band, with that band's scale and offset", () => {
       const gl = stubGl();
-      const renderer = preparedRenderer(geotiff, gl, { contour });
-      expect(() =>
-        renderer.updateContour!(resolveContourOptions({ ...contour, band: 1 })),
-      ).toThrow(RangeError);
-      // Nothing was applied by a refused update.
-      expect(renderer.buildPipeline(textures)[1]!.props).toMatchObject({
-        thresholds: { count: 3 },
+      const multi = fakeGeoTiff({
+        sampleFormat: SampleFormat.Float,
+        bitsPerSample: 32,
+        samplesPerPixel: 8,
+        scales: [1, 1, 1, 1, 1, 1, 0.01, 1],
+        offsets: [0, 0, 0, 0, 0, 0, -5, 0],
+      });
+      const renderer = preparedRenderer(multi, gl, { contour });
+      const built = renderer.buildPipeline(textures);
+      renderer.updateContour!(
+        resolveContourOptions({ ...contour, band: 6 }, 8),
+      );
+      renderer.prepare(gl);
+      // Every band is a layer of the tile's texture array, so the seed just
+      // reads another layer.
+      expect(built[0]!.props).toMatchObject({
+        band: 6,
+        scale: 0.01,
+        offset: -5,
       });
     });
 

@@ -222,8 +222,8 @@ for the next `prerender`.
    the tags, resolves the layer's `bands` and `rescale` (or its contour
    options) against them, and returns a `GeoTiffRenderer`: a GL-free tile
    loader, a bracket-only texture uploader, and a function that builds the
-   shader module chain for a tile. A `RangeError` here says the options do not fit
-   the file, which no retry can change, so it is rethrown as an
+   shader module chain for a tile. A `RangeError` here says the options do
+   not fit the file, which no retry can change, so it is rethrown as an
    `UnrecoverableSourceError` and the source is not retried. A palette
    image's `ColorMap` is parsed here too, so a missing or malformed one fails
    while the source opens; the colormap texture itself is created by the
@@ -294,7 +294,7 @@ asynchronous and GL-free:
 - The result, a `GeoTiffTilePixels`, is the planes, the content size, the
   halo width (0 for imagery) and an optional content-sized validity mask
   from the GeoTIFF's mask IFD. Every band of the file is kept, whichever are
-  drawn, so a later change of composite needs no reload.
+  drawn, so a later change of composite or contour band needs no reload.
 
 ### 2.4 Choosing the texture format
 
@@ -375,7 +375,8 @@ fail through the retry path, because `buildPipeline` has nothing to build
 from. This is also why `COGLayer.setContour` takes effect on the following
 frame: `updateContour` is GL-free and only records the resolved options, and
 the next `prepare` creates the new colour textures, deletes the old ones, and
-rewrites the module chain of every live tile in place.
+rewrites the module chain of every live tile in place, including the band
+layer the seed reads and that band's scale and offset.
 
 `COGLayer.setBands` and `setRescale` need no `prepare`, because every band is
 already on the GPU and no texture changes. `updateImagery` resolves the new
@@ -542,15 +543,15 @@ plus `float value` and `float valid` for modules that work on a scalar sample
 rather than a colour. In the imagery chains the seed, `BandTexture`, reads up
 to four layers of the band array, as the channel map `[r, g, b, a]` names
 them, and composes `color` in sampled units (section 2.4), bringing an alpha
-band to `[0, 1]`. It discards the pixel if any colour band is NaN or the
-nodata sentinel. Later modules apply the mask, stretch the colour channels to
+band to `[0, 1]`. It discards the pixel if any colour band is NaN or the nodata
+sentinel. Later modules apply the mask, stretch the colour channels to
 `[0, 1]` (`LinearRescale`), convert photometric interpretations or look up a
-colormap. In the contour chains the seed,
-`ValueTexture`, interpolates one layer and sets `value` in data units and
-`valid`, which is zero if any of the four texels is NaN or the nodata
-sentinel. Both seeds interpolate by hand from four `texelFetch` taps
-(`texture-sampling.ts`); a palette index takes the nearest tap instead,
-because a value between two classes is a third, unrelated class. The fill module after it (`Isoband`, `ValueGradient` or
+colormap. In the contour chains the seed, `ValueTexture`, interpolates one
+layer and sets `value` in data units and `valid`, which is zero if any of the
+four texels is NaN or the nodata sentinel. Both seeds interpolate by hand
+from four `texelFetch` taps (`texture-sampling.ts`); a palette index takes
+the nearest tap instead, because a value between two classes is a third,
+unrelated class. The fill module after it (`Isoband`, `ValueGradient` or
 `ClearColor`) writes `color` from those, and `ContourLine` composites lines
 over it. The end of `main()` is fixed:
 
@@ -565,9 +566,9 @@ order seed → mask → stretch → colour. For an 8-bit RGB COG it is
 `BandTexture` alone, since 8-bit samples need no stretch; a mask adds
 `MaskTexture`. A uint16 multispectral composite is
 `BandTexture → LinearRescale`, one selected band adds `BlackIsZero` to draw
-it as grey, and a palette image is `BandTexture → Colormap`. Each module instance carries
-the props (a texture binding, a channel map, a nodata value) that
-`getUniforms` turns into uniform values at draw time. Both renderers
+it as grey, and a palette image is `BandTexture → Colormap`. Each module
+instance carries the props (a texture binding, a channel map, a nodata value)
+that `getUniforms` turns into uniform values at draw time. Both renderers
 share their style by reference across every tile's chain (the imagery
 channel map and stretch, the contour fill and lines), which is what lets a
 re-style reach all tiles at once, either in place or by rebuilding their

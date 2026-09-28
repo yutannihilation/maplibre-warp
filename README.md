@@ -137,7 +137,7 @@ shader, so nodata is exact: a pixel is nodata when any of its colour bands
 is (palette rasters take the nearest texel instead). 8-bit unsigned samples
 default to their full range; anything else without `rescale` is a
 `RangeError` rather than a guessed stretch. The contour `band` is the same
-layer index.
+layer index and may change through `setContour`.
 
 ### Contours in the shader
 
@@ -166,7 +166,7 @@ layer.getBands(); // [{ band, min, max, color }, …] for a legend
 bands: { colors: schemeBlues[5] }
 
 // Re-style in place — no reload, tiles on the GPU repaint with the new
-// options on the next frame. Everything but `band` can change, including
+// options on the next frame. Everything can change, including the band,
 // the fill mode and lines on or off; a new module chain is compiled on
 // demand.
 layer.setContour({

@@ -400,14 +400,13 @@ export interface GeoTiffRenderer {
   /** Release layer-wide resources such as the colormap texture. */
   destroy(gl: WebGL2RenderingContext): void;
   /**
-   * Re-style contours for every tile already built: any change except the
-   * `band` to read, including switching the fill mode or lines on and off.
-   * Only the contour renderer has this. Takes options already run through
+   * Re-style contours for every tile already built: any change, including
+   * the `band` to read, the fill mode or lines on and off. Only the contour
+   * renderer has this. Takes options already run through
    * {@link resolveContourOptions} so the caller validates exactly once.
    *
-   * GL-free: it validates and records the change, which the next
-   * {@link prepare} applies. Until then tiles keep their current, consistent
-   * style.
+   * GL-free: it records the change, which the next {@link prepare} applies.
+   * Until then tiles keep their current, consistent style.
    */
   updateContour?(contour: ResolvedContourOptions): void;
   /**
@@ -867,9 +866,6 @@ function createContourRenderer(
     nodataSampled,
   } = bandSampling(geotiff, gl);
   const seed = ValueTexture[textureFormat.sampler];
-  const { band } = resolved;
-  const scale = denorm * (geotiff.scales[band] ?? 1);
-  const offset = geotiff.offsets[band] ?? 0;
 
   const colorTexture = (
     glContext: WebGL2RenderingContext,
@@ -890,11 +886,16 @@ function createContourRenderer(
     });
 
   /**
-   * The modules after the seed and mask, with their props. One instance is
-   * shared by reference with every tile's pipeline, so `getUniforms` reads
-   * precomputed objects and a re-style is a rebuild of this one object.
+   * The band to read and the modules after the seed and mask, with their
+   * props. One instance is shared by reference with every tile's pipeline,
+   * so `getUniforms` reads precomputed objects and a re-style is a rebuild
+   * of this one object.
    */
   interface ContourStyle {
+    band: number;
+    /** `value = raw · scale + offset`, with GDAL scale/offset for the band. */
+    scale: number;
+    offset: number;
     fill:
       | { module: typeof Isoband; props: IsobandProps }
       | { module: typeof ValueGradient; props: ValueGradientProps }
@@ -951,6 +952,9 @@ function createContourRenderer(
         );
     }
     return {
+      band: options.band,
+      scale: denorm * (geotiff.scales[options.band] ?? 1),
+      offset: geotiff.offsets[options.band] ?? 0,
       fill,
       lines: options.lines
         ? { thresholds: options.thresholds, ...options.lines }
@@ -986,10 +990,10 @@ function createContourRenderer(
         module: seed,
         props: {
           texture: { texture: textures.texture, target: gl.TEXTURE_2D_ARRAY },
-          band,
+          band: style.band,
           nodata: nodataSampled,
-          scale,
-          offset,
+          scale: style.scale,
+          offset: style.offset,
           size: new Float32Array([textures.width, textures.height]),
           halo: textures.halo,
         },
@@ -1039,14 +1043,6 @@ function createContourRenderer(
       }
     },
     updateContour: (next) => {
-      // The seed's band is what selects the texture layer; a change would
-      // need every tile's props rewritten and, for a multi-band raster, says
-      // the caller wants a different layer. Refuse rather than guess.
-      if (next.band !== band) {
-        throw new RangeError(
-          `setContour cannot change the band (${band} → ${next.band}); recreate the layer`,
-        );
-      }
       pending = next;
     },
   };
