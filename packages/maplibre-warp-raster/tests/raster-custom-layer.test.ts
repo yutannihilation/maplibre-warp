@@ -6,6 +6,7 @@ import type {
   RasterSource,
 } from "../src/raster-custom-layer.js";
 import {
+  frameUniforms,
   globeFrameUniforms,
   mercatorFrameUniforms,
   RasterCustomLayer,
@@ -293,6 +294,31 @@ describe("RasterCustomLayer prerender", () => {
 });
 
 describe("per-frame uniforms", () => {
+  it("adds the layer's opacity and pixel ratio to either projection's set", () => {
+    // `u_pixel_ratio` is what makes a contour line width mean CSS pixels; an
+    // unset uniform reads 0 in GLSL and would silently draw hairlines.
+    const map = {
+      getCenter: () => ({ lng: 0, lat: 0 }),
+    } as unknown as Parameters<typeof frameUniforms>[1];
+    const args = {
+      defaultProjectionData: {
+        mainMatrix: identityMatrix(),
+        fallbackMatrix: identityMatrix(),
+        tileMercatorCoords: [0, 0, 1, 1],
+        clippingPlane: [0, 0, 1, 0],
+        projectionTransition: 0,
+      },
+    } as unknown as Parameters<typeof frameUniforms>[2];
+    const layer = { opacity: 0.5, pixelRatio: 2 };
+
+    for (const projection of ["mercator", "globe"] as const) {
+      const uniforms = frameUniforms(projection, map, args, layer);
+      expect(uniforms.u_opacity).toBe(0.5);
+      expect(uniforms.u_pixel_ratio).toBe(2);
+      expect(uniforms.u_projection_matrix).toBeInstanceOf(Float32Array);
+    }
+  });
+
   it("folds the map centre into the matrix under mercator", () => {
     const map = {
       getCenter: () => ({ lng: 8.5417, lat: 47.3769 }),

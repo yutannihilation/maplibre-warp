@@ -65,16 +65,17 @@ ${BILINEAR_SAMPLE_GLSL("u_band", "u_band_nearest == 1")}`,
 ${BILINEAR_TAPS_GLSL("u_band")}
     bool invalid = false;
     bool bad = false;
+    vec2 unusedGradient;
     vec4 raw = vec4(0.0, 0.0, 0.0, 1.0);
     for (int c = 0; c < 3; c++) {
       int layer = u_band_channels[c];
       if (layer >= 0) {
-        raw[c] = u_band_sample(layer, i00, i11, f, bad);
+        raw[c] = u_band_sample(layer, i00, i11, f, bad, unusedGradient);
         invalid = invalid || bad;
       }
     }
     if (u_band_channels.a >= 0) {
-      raw.a = u_band_sample(u_band_channels.a, i00, i11, f, bad) / u_band_alpha_max;
+      raw.a = u_band_sample(u_band_channels.a, i00, i11, f, bad, unusedGradient) / u_band_alpha_max;
     }
     if (invalid) {
       discard;

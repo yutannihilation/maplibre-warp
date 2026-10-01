@@ -11,6 +11,7 @@ import type {
 import { splitFloat64 } from "./fp64.js";
 import { mercatorFromLngLat } from "./mercator.js";
 import type { GpuMesh } from "./mesh.js";
+import type { ViewportProjection } from "./projection.js";
 import { projectionFromVariant } from "./projection.js";
 import type { RenderPipeline, UniformValue } from "./shader/module.js";
 import { collectBindings } from "./shader/module.js";
@@ -427,13 +428,15 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
       return;
     }
 
-    const frameUniforms =
-      projection === "globe"
-        ? globeFrameUniforms(args)
-        : mercatorFrameUniforms(map, args);
-    frameUniforms.u_opacity = this._opacity;
-
-    this.drawTiles(gl, args, drawList, frameUniforms);
+    this.drawTiles(
+      gl,
+      args,
+      drawList,
+      frameUniforms(projection, map, args, {
+        opacity: this._opacity,
+        pixelRatio: viewport.pixelRatio,
+      }),
+    );
   }
 
   private drawTiles(
@@ -471,6 +474,29 @@ export abstract class RasterCustomLayer implements CustomLayerInterface {
     // stray binding would capture their `vertexAttribPointer` calls.
     gl.bindVertexArray(null);
   }
+}
+
+/**
+ * Every program's per-frame uniforms: the projection's vertex uniforms plus
+ * the layer's own `u_opacity` and `u_pixel_ratio` (framebuffer pixels per
+ * CSS pixel, so modules sized in CSS pixels — the contour lines — draw the
+ * same on every display density).
+ *
+ * Exported for unit testing.
+ */
+export function frameUniforms(
+  projection: ViewportProjection,
+  map: MapLibreMap,
+  args: CustomRenderMethodInput,
+  layer: { opacity: number; pixelRatio: number },
+): Record<string, UniformValue> {
+  const uniforms =
+    projection === "globe"
+      ? globeFrameUniforms(args)
+      : mercatorFrameUniforms(map, args);
+  uniforms.u_opacity = layer.opacity;
+  uniforms.u_pixel_ratio = layer.pixelRatio;
+  return uniforms;
 }
 
 /**

@@ -148,7 +148,7 @@ export type ContourFill = "bands" | "gradient" | "none";
 
 /** Line configuration for {@link ContourRenderOptions}. */
 export interface ContourLineOptions {
-  /** Screen pixels. @default 1 */
+  /** CSS pixels, like MapLibre's `line-width`. @default 1 */
   width?: number;
   /** Hex or `rgb()`/`rgba()`. @default "#333333" */
   color?: string;

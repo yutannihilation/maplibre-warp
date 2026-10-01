@@ -547,13 +547,22 @@ band to `[0, 1]`. It discards the pixel if any colour band is NaN or the nodata
 sentinel. Later modules apply the mask, stretch the colour channels to
 `[0, 1]` (`LinearRescale`), convert photometric interpretations or look up a
 colormap. In the contour chains the seed, `ValueTexture`, interpolates one
-layer and sets `value` in data units and `valid`, which is zero if any of the
-four texels is NaN or the nodata sentinel. Both seeds interpolate by hand
+layer and sets `value` in data units, `valid`, which is zero if any of the
+four texels is NaN or the nodata sentinel, and `valueGradient`, the screen-space
+gradient of `value` in data units per framebuffer pixel. The gradient is the
+bilinear patch's own derivative, taken from the same four taps and mapped to
+the screen through `dFdx(uv)`/`dFdy(uv)`; a `dFdx(value)` would be a 2 × 2-quad
+finite difference of a piecewise bilinear field, which jumps at every texel
+edge and made line widths wobble. Both seeds interpolate by hand
 from four `texelFetch` taps (`texture-sampling.ts`); a palette index takes
 the nearest tap instead, because a value between two classes is a third,
 unrelated class. The fill module after it (`Isoband`, `ValueGradient` or
 `ClearColor`) writes `color` from those, and `ContourLine` composites lines
-over it. The end of `main()` is fixed:
+over it, at `|value − t| / ‖valueGradient‖` framebuffer pixels from the nearest
+threshold `t`, with the width (in CSS pixels) scaled by the per-frame
+`u_pixel_ratio` and a one-pixel `smoothstep` ramp. The L2 norm keeps the width
+independent of the line's direction; `fwidth` is an L1 norm and thinned
+diagonals by up to √2. The end of `main()` is fixed:
 
 ```glsl
 fragColor = vec4(color.rgb * color.a * u_opacity, color.a * u_opacity);
@@ -587,7 +596,7 @@ samplers are assigned texture units sequentially as they are bound.
 
 1. `programs.get(shaderData, payload.pipeline)`; on a program change,
    `useProgram` and upload the per-frame uniforms (`u_projection_matrix`,
-   origin halves or globe uniforms, `u_opacity`).
+   origin halves or globe uniforms, `u_opacity`, `u_pixel_ratio`).
 2. `program.bind(collectBindings(pipeline))`: the module uniforms and
    textures for this tile.
 3. `gl.bindVertexArray(payload.mesh.vao)` and

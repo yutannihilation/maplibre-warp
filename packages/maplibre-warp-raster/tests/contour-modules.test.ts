@@ -34,6 +34,20 @@ describe("ValueTexture", () => {
     }
   });
 
+  it("seeds the screen-space gradient from the sampler's, not from dFdx(value)", () => {
+    for (const kind of ["float", "uint", "int"] as const) {
+      const module = ValueTexture[kind];
+      // The bilinear patch's own derivative comes out of the sampler; screen
+      // derivatives of a piecewise bilinear field would jump at every texel
+      // edge. Only `uv` is differentiated, for the texel → pixel Jacobian.
+      expect(module.fsDecl).toContain("out vec2 gradient");
+      expect(module.fsColor).toContain("valueGradient =");
+      expect(module.fsColor).toContain("dFdx(uv)");
+      expect(module.fsColor).toContain("dFdy(uv)");
+      expect(module.fsColor).not.toMatch(/dFd[xy]\(value\)|fwidth/);
+    }
+  });
+
   it("treats non-finite texels as missing, not only the sentinel", () => {
     for (const kind of ["float", "uint", "int"] as const) {
       const decl = ValueTexture[kind].fsDecl!;
@@ -156,8 +170,8 @@ describe("Isoband", () => {
 
   it("reads `value`, blanks invalid pixels without discarding, and looks the band up", () => {
     expect(Isoband.fsColor).toContain("value");
-    // `discard` would leave derivatives undefined for ContourLine's fwidth in
-    // the same quad; a transparent colour is equivalent for a depth-less layer.
+    // `discard` would end the fragment before ContourLine could draw over an
+    // open band; a transparent colour is equivalent for a depth-less layer.
     expect(Isoband.fsColor).not.toContain("discard");
     expect(Isoband.fsColor).toContain("texelFetch(u_band_colors");
   });
@@ -225,11 +239,6 @@ describe("ContourLine", () => {
       Array.from(Float32Array.from([0, 0, 1, 128 / 255])),
     );
   });
-
-  it("uses screen-space derivatives for constant pixel width", () => {
-    expect(ContourLine.fsColor).toContain("fwidth(value)");
-    expect(ContourLine.fsColor).toContain("smoothstep");
-  });
 });
 
 describe("fragment assembly with contour modules", () => {
@@ -241,6 +250,8 @@ describe("fragment assembly with contour modules", () => {
     ];
     const source = buildFragmentSource(pipeline);
     expect(source).toContain("float value = 0.0;");
+    expect(source).toContain("vec2 valueGradient = vec2(0.0);");
+    expect(source).toContain("uniform float u_pixel_ratio;");
     expect(source.match(/uniform float u_thresholds\[/g)).toHaveLength(1);
     expect(source).toContain(`#define MAX_THRESHOLDS ${MAX_THRESHOLDS}`);
     expect(pipelineKey("mercator", pipeline)).toBe(
