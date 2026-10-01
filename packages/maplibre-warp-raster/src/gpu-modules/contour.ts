@@ -2,9 +2,9 @@
  * Contour shader modules: a scalar seed, filled bands, a continuous gradient,
  * lines.
  *
- * All of them work on the `value`/`valid` variables `buildFragmentSource`
- * declares in `main()`, so bands can recolour `color` while lines still see
- * the underlying sample.
+ * All of them work on the `value`/`valid`/`valueGradient` variables
+ * `buildFragmentSource` declares in `main()`, so bands can recolour `color`
+ * while lines still see the underlying sample and its gradient.
  */
 
 import type { RasterShaderModule, TextureBinding } from "../shader/module.js";
@@ -63,13 +63,20 @@ uniform int u_value_halo;
 
 ${BILINEAR_SAMPLE_GLSL("u_value", "false")}`,
     // The band is a layer of the array; see `texture-sampling.ts` for why the
-    // interpolation is manual.
+    // interpolation is manual. The sampler's per-texel gradient is taken to
+    // screen space through the Jacobian of `uv` (chain rule: the texel
+    // position is `uv · size` plus a constant). `dFdx`/`dFdy` sit in uniform
+    // control flow, as derivatives must.
     fsColor: `  {
 ${BILINEAR_TAPS_GLSL("u_value")}
     bool invalid = false;
-    float raw = u_value_sample(u_value_band, i00, i11, f, invalid);
+    vec2 texelGradient;
+    float raw = u_value_sample(u_value_band, i00, i11, f, invalid, texelGradient);
     valid = invalid ? 0.0 : 1.0;
     value = raw * u_value_scale + u_value_offset;
+    vec2 dpdx = dFdx(uv) * u_value_size;
+    vec2 dpdy = dFdy(uv) * u_value_size;
+    valueGradient = u_value_scale * vec2(dot(texelGradient, dpdx), dot(texelGradient, dpdy));
     color = vec4(value, 0.0, 0.0, valid);
   }`,
     getUniforms: (props) => {
@@ -98,7 +105,7 @@ ${BILINEAR_TAPS_GLSL("u_value")}
   };
 }
 
-/** Seeds `value`/`valid` from one layer of a band array texture; one variant per sampler kind. */
+/** Seeds `value`/`valid`/`valueGradient` from one layer of a band array texture; one variant per sampler kind. */
 export const ValueTexture: Record<
   ValueSamplerKind,
   RasterShaderModule<ValueTextureProps>
@@ -159,8 +166,8 @@ export interface IsobandProps {
  * Filled contour bands: classify `value` against the thresholds and look the
  * band's colour up. Invalid pixels and switched-off open bands become
  * transparent rather than discarded: a following {@link ContourLine} can
- * still draw the boundary line over an open band, and `discard` would leave
- * `fwidth` undefined for the other fragments of the quad. For a layer that
+ * still draw the boundary line over an open band, which a `discard` here
+ * would prevent. For a layer that
  * writes no depth, premultiplied transparent output is a no-op under
  * MapLibre's `(ONE, ONE_MINUS_SRC_ALPHA)` blend, exactly like discard.
  */
@@ -202,7 +209,7 @@ uniform sampler2D u_band_colors;`,
 
 export interface ContourLineProps {
   thresholds: PackedThresholds;
-  /** Line width in screen pixels. */
+  /** Line width in CSS pixels, like MapLibre's `line-width`. */
   width: number;
   /** Straight-alpha RGBA in 0–1 (see `colorToVec4`), resolved once per layer. */
   color: Float32Array;
@@ -217,7 +224,13 @@ export interface ContourLineProps {
 /**
  * Anti-aliased contour lines of constant screen width, composited over
  * whatever `color` holds (bands, or {@link ClearColor}'s transparent base).
- * Distance to the nearest threshold in pixels is `|value − t| / fwidth(value)`.
+ * Distance to the nearest threshold in framebuffer pixels is
+ * `|value − t| / ‖valueGradient‖`, a first-order estimate that is exact where
+ * the surface is planar. The L2 norm keeps the width independent of the
+ * line's direction (`fwidth` is an L1 norm and thins diagonals by up to √2),
+ * and the seed's analytic gradient keeps it free of the quad-level noise of
+ * screen derivatives. Widths are CSS pixels: the frame's `u_pixel_ratio`
+ * scales them to the framebuffer, where the 1-pixel `smoothstep` ramp lives.
  */
 export const ContourLine: RasterShaderModule<ContourLineProps> = {
   name: "contour-line",
@@ -227,9 +240,16 @@ uniform vec4 u_line_color;
 uniform int u_major_every;
 uniform float u_major_width;
 uniform vec4 u_major_color;`,
-  // `fwidth` is evaluated in uniform control flow, before any branch.
-  fsColor: `  float contourFw = fwidth(value);
-  if (valid != 0.0 && contourFw > 0.0) {
+  // The norm is taken after scaling by the largest component, so a huge
+  // gradient cannot overflow its squares to infinity, which would put every
+  // pixel at distance zero. A NaN gradient (from a NaN tap) fails the
+  // `> 0.0` test, as `valid` does.
+  fsColor: `  vec2 absGradient = abs(valueGradient);
+  float gradientScale = max(absGradient.x, absGradient.y);
+  float contourGradient = gradientScale > 0.0
+    ? gradientScale * length(absGradient / gradientScale)
+    : 0.0;
+  if (valid != 0.0 && contourGradient > 0.0) {
     int nearest = -1;
     float best = 0.0;
     for (int i = 0; i < MAX_THRESHOLDS; i++) {
@@ -244,9 +264,9 @@ uniform vec4 u_major_color;`,
     }
     if (nearest >= 0) {
       bool major = u_major_every > 0 && (nearest % u_major_every) == 0;
-      float halfWidth = 0.5 * (major ? u_major_width : u_line_width);
+      float halfWidth = 0.5 * u_pixel_ratio * (major ? u_major_width : u_line_width);
       vec4 line = major ? u_major_color : u_line_color;
-      float px = best / contourFw;
+      float px = best / contourGradient;
       float a = (1.0 - smoothstep(halfWidth - 0.5, halfWidth + 0.5, px)) * line.a;
       // Straight-alpha "over": the line on top of the current colour.
       float outA = a + color.a * (1.0 - a);
@@ -289,7 +309,7 @@ export interface ValueGradientProps {
  * outside that range the pixel is painted with the end colour or left
  * transparent according to `includeLower`/`includeUpper`, mirroring
  * {@link Isoband}'s open bands so a following {@link ContourLine} still
- * draws there. Never discards, for the same `fwidth` reason as `Isoband`.
+ * draws there. Never discards, for the same reasons as {@link Isoband}.
  */
 export const ValueGradient: RasterShaderModule<ValueGradientProps> = {
   name: "value-gradient",

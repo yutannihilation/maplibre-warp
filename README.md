@@ -195,8 +195,10 @@ the shader with `texelFetch` — integer textures cannot be LINEAR-filtered,
 and this also keeps nodata exact. Bands classify
 the value against up to 64 thresholds and look their colour up in a small
 texture; the gradient maps the value onto a 256-texel ramp instead; lines
-measure the distance to the nearest threshold in screen pixels via `fwidth`,
-so they keep a constant width at every zoom and under globe. Colours are hex or `rgb()`/`rgba()` strings, and every contour option
+measure the distance to the nearest threshold in pixels from the analytic
+gradient of the interpolated value, so they keep a constant width (in CSS
+pixels, like `line-width`) in every direction, at every zoom and under globe.
+Colours are hex or `rgb()`/`rgba()` strings, and every contour option
 is validated in the `COGLayer` constructor so a misconfiguration fails before
 any network request. Output is raster: no labels and no picking.
 

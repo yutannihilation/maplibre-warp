@@ -100,8 +100,11 @@ ${body}
 /**
  * Fragment shader: the module chain, then premultiplied output.
  *
- * Besides `color` and `uv`, `main()` declares `value` and `valid` for modules
- * that work on a scalar sample rather than a colour (the contour chain).
+ * Besides `color` and `uv`, `main()` declares `value`, `valid` and
+ * `valueGradient` for modules that work on a scalar sample rather than a
+ * colour (the contour chain). `u_pixel_ratio` is a per-frame uniform like
+ * `u_opacity`: framebuffer pixels per CSS pixel, for modules that take sizes
+ * in CSS pixels.
  *
  * MapLibre enters custom layers with `blendFunc(ONE, ONE_MINUS_SRC_ALPHA)`, so
  * colour must be premultiplied by alpha.
@@ -136,16 +139,19 @@ in vec2 v_uv;
 out vec4 fragColor;
 
 uniform float u_opacity;
+uniform float u_pixel_ratio;
 
 ${decls}
 
 void main() {
   vec2 uv = v_uv;
   vec4 color = vec4(0.0);
-  // Set by value-seeding modules: the sample in data units, and whether the
-  // pixel holds data at all. Read by the contour modules.
+  // Set by value-seeding modules: the sample in data units, whether the
+  // pixel holds data at all, and the sample's screen-space gradient in data
+  // units per framebuffer pixel. Read by the contour modules.
   float value = 0.0;
   float valid = 0.0;
+  vec2 valueGradient = vec2(0.0);
 
 ${body}
 
